@@ -57,7 +57,7 @@ const fetchFixtures = async (leagueId, season, next = 5) => {
                 timezone: 'America/Mexico_City',
             },
         });
-         // --- LOG PARA VER LA RESPUESTA DE LA API-FOOTBALL (FETCH FIXTURES) ---
+        // --- LOG PARA VER LA RESPUESTA DE LA API-FOOTBALL (FETCH FIXTURES) ---
         console.log(`📡 [API-Football] Respuesta para /fixtures (Liga:${leagueId}, Temp:${season}):`);
         console.log(`   Resultados: ${response.data.results}, Errores: ${response.data.errors ? JSON.stringify(response.data.errors) : 'Ninguno'}, Partidos: ${response.data.response ? response.data.response.length : 0}`);
         // ------------------------------------------------------------------
@@ -156,9 +156,10 @@ const getStandings = async (leagueId, season) => {
 // === FUNCIONES PARA EL MODELO DE PREDICIÓN ===
 // ===========================================
 
-function factorial(n) { /* ... */ return 1;} // Implementación ya proporcionada
-function poissonPMF(k, lambda) { /* ... */ return 0;} // Implementación ya proporcionada
-function parseForm(formString) { /* ... */ return { win: 0, draw: 0, lose: 0 };} // Implementación ya proporcionada
+function factorial(n) { if (n === 0) return 1; let res = 1; for (let i = 2; i <= n; i++) res *= i; return res;}
+function poissonPMF(k, lambda) { if (lambda < 0) return 0; return (Math.pow(lambda, k) * Math.exp(-lambda)) / factorial(k);}
+function parseForm(formString) { if (!formString) return { win: 0, draw: 0, lose: 0 }; const wins = (formString.match(/W/g) || []).length; const draws = (formString.match(/D/g) || []).length; const losses = (formString.match(/L/g) || []).length; return { win: wins, draw: draws, lose: losses };}
+
 
 /**
  * Genera una predicción de partido utilizando un modelo simplificado basado en Poisson.
@@ -319,6 +320,10 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
                 draw: (drawProb * 100).toFixed(0) + '%',
                 away: (awayWinProb * 100).toFixed(0) + '%',
             },
+            // --- ¡¡¡ESTAS PROBABILIDADES SON AHORA INCLUIDAS EN LA RESPUESTA!!! ---
+            btts_probability: parseFloat((bttsProb * 100).toFixed(1)),
+            over_2_5_probability: parseFloat((over2_5Prob * 100).toFixed(1)),
+            under_2_5_probability: parseFloat(((1 - over2_5Prob) * 100).toFixed(1)),
         },
         comparison: {
             form: {
@@ -400,6 +405,138 @@ app.post('/api/predict-match', async (req, res) => {
         }
         res.status(500).json({ error: 'Fallo al generar la predicción', details: details });
     }
+});
+
+// --- NUEVO ENDPOINT: PARLEY DEL DÍA ---
+app.get('/api/parley-del-dia', async (req, res) => {
+    const nextFixturesCount = 20; // Cuántos partidos futuros escanear por liga
+    let bestParley = null;
+    let highestConfidence = 0; // Para el ganador (Home/Away/Draw)
+    
+    // Define las ligas y temporadas que quieres escanear para el Parley del Día
+    // Es CRÍTICO que estas combinaciones de liga/temporada tengan datos de estadísticas disponibles
+    const leaguesToScanForParley = [
+        { league: 253, season: 2025, name: "Major League Soccer" }, // MLS 2025
+        { league: 15, season: 2025, name: "FIFA Club World Cup" },     // Premier League 2025
+        { league: 22, season: 2025, name: "CONCACAF Gold Cup" },        // La Liga 2025
+        { league: 244, season: 2025, name: "Veikkausliiga" },        // Serie A 2025
+        { league: 98, season: 2025, name: "J1 League" },
+        // Puedes añadir más si sabes que tienen datos consistentes
+        // { id: 253, season: 2024, name: "Major League Soccer" }, // MLS 2024 (si sus stats funcionan para 2024/2023)
+    ];
+
+    for (const leagueInfo of leaguesToScanForParley) {
+        try {
+            console.log(`🔎 Escaneando partidos para Parley: ${leagueInfo.name}, Temporada ${leagueInfo.season}...`);
+            const fixturesData = await fetchFixtures(leagueInfo.id, leagueInfo.season, nextFixturesCount);
+            
+            if (fixturesData.response && fixturesData.response.length > 0) {
+                for (const fixture of fixturesData.response) {
+                    try {
+                        const predictionResult = await getMatchPrediction(
+                            fixture.teams.home.id,
+                            fixture.teams.away.id,
+                            fixture.league.id,
+                            fixture.league.season // Usar la temporada del fixture, no la de stats para el cálculo
+                        );
+
+                        const homeProb = parseFloat(predictionResult.predictions.percent.home) / 100;
+                        const awayProb = parseFloat(predictionResult.predictions.percent.away) / 100;
+                        const drawProb = parseFloat(predictionResult.predictions.percent.draw) / 100;
+                        const bttsProb = predictionResult.predictions.btts_probability / 100;
+                        const over2_5Prob = predictionResult.predictions.over_2_5_probability / 100;
+                        const under2_5Prob = predictionResult.predictions.under_2_5_probability / 100;
+
+                        let bestPick = null;
+                        let pickConfidence = 0;
+                        let pickType = '';
+                        let pickDescription = '';
+                        let simulatedIndividualOdd = 0;
+
+                        if (homeProb >= 0.75) {
+                            bestPick = `${fixture.teams.home.name} gana el partido`;
+                            pickConfidence = homeProb;
+                            pickType = 'Ganador';
+                        } else if (awayProb >= 0.75) {
+                            bestPick = `${fixture.teams.away.name} gana el partido`;
+                            pickConfidence = awayProb;
+                            pickType = 'Ganador';
+                        }
+                        else if (over2_5Prob >= 0.70) {
+                            pickDescription = 'Más de 2.5 Goles';
+                            pickConfidence = over2_5Prob;
+                            pickType = 'Total de Goles';
+                        }
+                        else if (bttsProb >= 0.70) {
+                            pickDescription = 'Ambos Anotan: SÍ';
+                            pickConfidence = bttsProb;
+                            pickType = 'Ambos Anotan';
+                        }
+                        else if (under2_5Prob >= 0.70) {
+                            pickDescription = 'Menos de 2.5 Goles';
+                            pickConfidence = under2_5Prob;
+                            pickType = 'Total de Goles';
+                        }
+
+
+                        if (bestPick && pickConfidence > 0) {
+                            simulatedIndividualOdd = (1 / pickConfidence);
+                            allCandidateLegs.push({
+                                match_id: fixture.fixture.id,
+                                home_team: fixture.teams.home.name,
+                                away_team: fixture.teams.away.name,
+                                home_logo: fixture.teams.home.logo,
+                                away_logo: fixture.teams.away.logo,
+                                competition_name: fixture.league.name,
+                                starting_at: fixture.fixture.date,
+                                pick_type: pickType,
+                                pick_description: pickDescription,
+                                confidence_percent: parseFloat((pickConfidence * 100).toFixed(1)),
+                                simulated_individual_odd: parseFloat(simulatedIndividualOdd.toFixed(2)),
+                            });
+                        }
+                    } catch (predictionError) {
+                        console.warn(`⚠️ Fallo al generar predicción para fixture ${fixture.fixture.id}: ${predictionError.message}`);
+                    }
+                }
+            }
+        } catch (leagueError) {
+            console.error(`❌ Error al escanear liga ${leagueInfo.name} para Parley: ${leagueError.message}`);
+        }
+    }
+
+    const selectedLegs = [];
+    const usedMatchIds = new Set();
+    const targetLegs = 3;
+
+    for (const leg of allCandidateLegs) {
+        if (selectedLegs.length < targetLegs && !usedMatchIds.has(leg.match_id)) {
+            selectedLegs.push(leg);
+            usedMatchIds.add(leg.match_id);
+        }
+    }
+
+    if (selectedLegs.length < targetLegs) {
+        console.warn(`😔 No se pudieron encontrar suficientes selecciones de alta confianza para el parley del día. Encontrados: ${selectedLegs.length}`);
+        return res.status(404).json({ message: "No se encontró un Parley del Día emocionante hoy. ¡Vuelve pronto!" });
+    }
+
+    let totalSimulatedOdd = 1;
+    let totalConfidencePercent = 1;
+    selectedLegs.forEach(leg => {
+        totalSimulatedOdd *= leg.simulated_individual_odd;
+        totalConfidencePercent *= (leg.confidence_percent / 100);
+    });
+
+    res.json({
+        parley_id: `daily-parley-${new Date().toISOString().slice(0, 10)}`,
+        title: `🏆 Tripleta de Confianza del Día - ${new Date().toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })}`,
+        advice: "¡Esta es nuestra combinación más sólida de hoy, respaldada por nuestro modelo! Juega con estrategia.",
+        legs: selectedLegs,
+        total_simulated_odd: parseFloat(totalSimulatedOdd.toFixed(2)),
+        total_confidence_percent: parseFloat((totalConfidencePercent * 100).toFixed(1)),
+    });
+
 });
 
 // ===================
