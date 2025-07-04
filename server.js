@@ -22,6 +22,61 @@ const apiFootball = axios.create({
 });
 
 // ======================================================
+// === CONFIGURACIÓN DE LA CACHE EN MEMORIA ===
+// ======================================================
+const cache = {}; // Objeto global para almacenar la cache
+
+/**
+ * Función genérica para manejar llamadas a la API-Football con cache.
+ * @param {string} endpoint - El endpoint de la API-Football (ej: '/fixtures').
+ * @param {object} params - Los parámetros de la solicitud.
+ * @param {number} ttl - Tiempo de vida de la cache en milisegundos.
+ * @returns {Promise<object>} La respuesta de la API-Football (desde cache o nueva).
+ */
+const cachedApiCall = async (endpoint, params, ttl = 3600 * 1000) => { // TTL por defecto: 1 hora
+    const cacheKey = `${endpoint}-${JSON.stringify(params)}`; // Clave única para esta petición
+    const now = Date.now();
+
+    // Comprobar si los datos están en cache y no han expirado
+    if (cache[cacheKey] && (now - cache[cacheKey].timestamp < cache[cacheKey].ttl)) {
+        console.log(`⚡️ Cache HIT: ${endpoint} - ${cacheKey.substring(0, 50)}...`);
+        return cache[cacheKey].data;
+    }
+
+    // Si no está en cache o ha expirado, hacer la llamada a la API
+    console.log(`🌍 Cache MISS: ${endpoint} - ${cacheKey.substring(0, 50)}... Fetching from API...`);
+    
+    try {
+        const response = await apiFootball.get(endpoint, { params });
+
+        // Si la API devuelve un objeto 'errors' no vacío, lo tratamos como un error y no lo cacheamos
+        if (response.data.errors && Object.keys(response.data.errors).length > 0) {
+            const apiErrorMessage = Object.values(response.data.errors).join(', ');
+            throw new Error(`API-Football Error: ${apiErrorMessage}`);
+        }
+        
+        // Almacenar la respuesta exitosa en cache
+        cache[cacheKey] = {
+            data: response.data,
+            timestamp: now,
+            ttl: ttl,
+        };
+        return response.data;
+
+    } catch (error) {
+        // Registrar el error pero no cachearlo
+        console.error(`❌ Error en cachedApiCall para ${endpoint}:`, error.message);
+        if (axios.isAxiosError(error) && error.response) {
+            throw new Error(`API-Football HTTP Error ${error.response.status}: ${error.response.statusText || JSON.stringify(error.response.data)}`);
+        } else if (axios.isAxiosError(error) && error.request) {
+            throw new Error('API-Football Network Error: No response received from server.');
+        } else {
+            throw new Error(`API-Football Unknown Error: ${error.message}`);
+        }
+    }
+};
+
+// ======================================================
 // === MIDDLEWARE DE LA APLICACIÓN ===
 // ======================================================
 
@@ -38,118 +93,66 @@ app.use((req, res, next) => {
 
 // ======================================================
 // === FUNCIONES PARA OBTENER DATOS DE LA API-FOOTBALL ===
+// === (AHORA USAN cachedApiCall) ===
 // ======================================================
 
 /**
- * Obtiene partidos futuros de una liga y temporada.
+ * Obtiene partidos futuros de una liga y temporada (ahora con cache).
  * @param {number} leagueId - ID de la liga.
  * @param {number} season - Año de la temporada.
  * @param {number} next - Número de partidos futuros a obtener.
  * @returns {Promise<object>} Datos de partidos.
  */
 const fetchFixtures = async (leagueId, season, next = 5) => {
-    try {
-        const response = await apiFootball.get('/fixtures', {
-            params: {
-                league: leagueId,
-                season: season,
-                next: next,
-                timezone: 'America/Mexico_City',
-            },
-        });
-        // --- LOG PARA VER LA RESPUESTA DE LA API-FOOTBALL (FETCH FIXTURES) ---
-        console.log(`📡 [API-Football] Respuesta para /fixtures (Liga:${leagueId}, Temp:${season}):`);
-        console.log(`   Resultados: ${response.data.results}, Errores: ${response.data.errors ? JSON.stringify(response.data.errors) : 'Ninguno'}, Partidos: ${response.data.response ? response.data.response.length : 0}`);
-        // ------------------------------------------------------------------
-        if (response.data.errors && Object.keys(response.data.errors).length > 0) {
-            const apiErrorMessage = Object.values(response.data.errors).join(', ');
-            throw new Error(`API-Football Error: ${apiErrorMessage}`);
-        }
-        return response.data;
-    } catch (error) {
-        console.error("❌ Error al obtener partidos de API-Football:", error.message);
-        if (axios.isAxiosError(error) && error.response) {
-            throw new Error(`API-Football HTTP Error ${error.response.status}: ${error.response.statusText || JSON.stringify(error.response.data)}`);
-        } else if (axios.isAxiosError(error) && error.request) {
-            throw new Error('API-Football Network Error: No response received from server.');
-        } else {
-            throw new Error(`API-Football Unknown Error: ${error.message}`);
-        }
+    const fixturesTtl = 60 * 60 * 1000; // Cachear fixtures por 1 hora
+    const responseData = await cachedApiCall('/fixtures', { league: leagueId, season: season, next: next, timezone: 'America/Mexico_City' }, fixturesTtl);
+    
+    if (responseData.errors && Object.keys(responseData.errors).length > 0) {
+        const apiErrorMessage = Object.values(responseData.errors).join(', ');
+        throw new Error(`API-Football Error: ${apiErrorMessage}`);
     }
+    return responseData;
 };
 
 /**
- * Obtiene estadísticas detalladas de un equipo para una liga y temporada específica.
+ * Obtiene estadísticas detalladas de un equipo (ahora con cache).
  * @param {number} teamId - ID del equipo.
  * @param {number} leagueId - ID de la liga.
  * @param {number} season - Año de la temporada.
  * @returns {Promise<object>} Datos de estadísticas del equipo.
  */
 const getTeamStatistics = async (teamId, leagueId, season) => {
-    try {
-        const response = await apiFootball.get('/teams/statistics', {
-            params: {
-                team: teamId,
-                league: leagueId,
-                season: season,
-            },
-        });
-        // --- LOG PARA VER LA RESPUESTA DE LA API-FOOTBALL (GET TEAM STATS) ---
-        console.log(`📊 [API-Football] Respuesta para /teams/statistics (Equipo:${teamId}, Liga:${leagueId}, Temp:${season}):`);
-        console.log(`   Resultados: ${response.data.results}, Errores: ${response.data.errors ? JSON.stringify(response.data.errors) : 'Ninguno'}, Data: ${response.data.response ? response.data.response.length : 0}`);
-        // ------------------------------------------------------------------
-        if (response.data.errors && Object.keys(response.data.errors).length > 0) {
-            const apiErrorMessage = Object.values(response.data.errors).join(', ');
-            throw new Error(`API-Football Error: ${apiErrorMessage}`);
-        }
-        if (response.data.response && response.data.response.length > 0) {
-            return response.data.response[0];
-        }
-        throw new Error(`No statistics found for team ${teamId} in league ${leagueId} season ${season}`);
-    } catch (error) {
-        console.error(`Error al obtener estadísticas del equipo ${teamId}:`, error.message);
-        if (axios.isAxiosError(error) && error.response) {
-            throw new Error(`API-Football HTTP Error ${error.response.status}: ${error.response.statusText || JSON.stringify(error.response.data)}`);
-        } else if (axios.isAxiosError(error) && error.request) {
-            throw new Error('API-Football Network Error: No response received from server.');
-        } else {
-            throw new Error(`Fallo al obtener estadísticas del equipo: ${error.message}`);
-        }
+    const statsTtl = 6 * 3600 * 1000; // Cachear estadísticas por 6 horas
+    const responseData = await cachedApiCall('/teams/statistics', { team: teamId, league: leagueId, season: season }, statsTtl);
+
+    if (responseData.errors && Object.keys(responseData.errors).length > 0) {
+        const apiErrorMessage = Object.values(responseData.errors).join(', ');
+        throw new Error(`API-Football Error: ${apiErrorMessage}`);
     }
+    if (responseData.response && responseData.response.length > 0) {
+        return responseData.response[0];
+    }
+    throw new Error(`No statistics found for team ${teamId} in league ${leagueId} season ${season}`);
 };
 
 /**
- * Obtiene la clasificación (standings) de una liga para una temporada específica.
+ * Obtiene la clasificación (standings) de una liga (ahora con cache).
  * @param {number} leagueId - ID de la liga.
  * @param {number} season - Año de la temporada.
  * @returns {Promise<object>} Datos de clasificación de la liga.
  */
 const getStandings = async (leagueId, season) => {
-    try {
-        const response = await apiFootball.get('/standings', {
-            params: {
-                league: leagueId,
-                season: season,
-            },
-        });
-        if (response.data.errors && Object.keys(response.data.errors).length > 0) {
-            const apiErrorMessage = Object.values(response.data.errors).join(', ');
-            throw new Error(`API-Football Error: ${apiErrorMessage}`);
-        }
-        if (response.data.response && response.data.response.length > 0 && response.data.response[0].league.standings.length > 0) {
-            return response.data.response[0].league.standings[0];
-        }
-        throw new Error(`No standings found for league ${leagueId} season ${season}`);
-    } catch (error) {
-        console.error(`Error al obtener clasificaciones para la liga ${leagueId}, temporada ${season}:`, error.message);
-        if (axios.isAxiosError(error) && error.response) {
-            throw new Error(`API-Football HTTP Error ${error.response.status}: ${error.response.statusText || JSON.stringify(error.response.data)}`);
-        } else if (axios.isAxiosError(error) && error.request) {
-            throw new Error('API-Football Network Error: No response received from server.');
-        } else {
-            throw new Error(`Fallo al obtener clasificaciones: ${error.message}`);
-        }
+    const standingsTtl = 6 * 3600 * 1000; // Cachear clasificaciones por 6 horas
+    const responseData = await cachedApiCall('/standings', { league: leagueId, season: season }, standingsTtl);
+
+    if (responseData.errors && Object.keys(responseData.errors).length > 0) {
+        const apiErrorMessage = Object.values(responseData.errors).join(', ');
+        throw new Error(`API-Football Error: ${apiErrorMessage}`);
     }
+    if (responseData.response && responseData.response.length > 0 && responseData.response[0].league.standings.length > 0) {
+        return responseData.response[0].league.standings[0];
+    }
+    throw new Error(`No standings found for league ${leagueId} season ${season}`);
 };
 
 // ===========================================
@@ -320,7 +323,6 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
                 draw: (drawProb * 100).toFixed(0) + '%',
                 away: (awayWinProb * 100).toFixed(0) + '%',
             },
-            // --- ¡¡¡ESTAS PROBABILIDADES SON AHORA INCLUIDAS EN LA RESPUESTA!!! ---
             btts_probability: parseFloat((bttsProb * 100).toFixed(1)),
             over_2_5_probability: parseFloat((over2_5Prob * 100).toFixed(1)),
             under_2_5_probability: parseFloat(((1 - over2_5Prob) * 100).toFixed(1)),
@@ -388,7 +390,7 @@ app.get('/api/all-fixtures', async (req, res) => {
 
 // Nuevo Endpoint para obtener predicciones personalizadas
 app.post('/api/predict-match', async (req, res) => {
-    const { homeTeamId, awayTeamId, leagueId, season } = req.body; // Line 409:13 if code lines up
+    const { homeTeamId, awayTeamId, leagueId, season } = req.body;
 
     if (!homeTeamId || !awayTeamId || !leagueId || !season) {
         return res.status(400).json({ error: 'Faltan parámetros requeridos: homeTeamId, awayTeamId, leagueId, season' });
@@ -416,11 +418,9 @@ app.get('/api/parley-del-dia', async (req, res) => {
     // Define las ligas y temporadas que quieres escanear para el Parley del Día
     // Es CRÍTICO que estas combinaciones de liga/temporada tengan datos de estadísticas disponibles
     const leaguesToScanForParley = [
-        { league: 253, season: 2025, name: "Major League Soccer" }, // MLS 2025
-        { league: 15, season: 2025, name: "FIFA Club World Cup" },     // Premier League 2025
-        { league: 22, season: 2025, name: "CONCACAF Gold Cup" },        // La Liga 2025
-        { league: 244, season: 2025, name: "Veikkausliiga" },        // Serie A 2025
-        { league: 98, season: 2025, name: "J1 League" },
+        { id: 39, season: 2024, name: "Premier League" }, // Premier League 2024/2025
+        { id: 140, season: 2024, name: "La Liga" },      // La Liga 2024/2025
+        { id: 135, season: 2024, name: "Serie A" },      // Serie A 2024/2025
         // Puedes añadir más si sabes que tienen datos consistentes
         // { id: 253, season: 2024, name: "Major League Soccer" }, // MLS 2024 (si sus stats funcionan para 2024/2023)
     ];
@@ -493,6 +493,8 @@ app.get('/api/parley-del-dia', async (req, res) => {
                                 pick_description: pickDescription,
                                 confidence_percent: parseFloat((pickConfidence * 100).toFixed(1)),
                                 simulated_individual_odd: parseFloat(simulatedIndividualOdd.toFixed(2)),
+                                league_id: fixture.league.id,
+                                season_year: fixture.league.season,
                             });
                         }
                     } catch (predictionError) {
