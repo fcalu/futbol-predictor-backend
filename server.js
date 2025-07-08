@@ -14,7 +14,7 @@ const API_BASE_URL = `https://${RAPIDAPI_HOST}/v3`;
 
 // Instancia de Axios configurada para la API-Football
 const apiFootball = axios.create({
-    baseURL: API_BASE_URL,
+    baseURL: API_BASE_URL, // CORRECCIÓN: Era API_BASE_BASE_URL
     headers: {
         'x-rapidapi-key': RAPIDAPI_KEY,
         'x-rapidapi-host': RAPIDAPI_HOST,
@@ -93,7 +93,7 @@ app.use((req, res, next) => {
 
 // ======================================================
 // === FUNCIONES PARA OBTENER DATOS DE LA API-FOOTBALL ===
-// === (AHORA USAN cachedApiCall) ===
+// === (AHORA USAN CACHE) ===
 // ======================================================
 
 /**
