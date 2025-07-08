@@ -14,7 +14,7 @@ const API_BASE_URL = `https://${RAPIDAPI_HOST}/v3`;
 
 // Instancia de Axios configurada para la API-Football
 const apiFootball = axios.create({
-    baseURL: API_BASE_URL,
+    baseURL: API_BASE_URL, // CORRECCIÓN: Era API_BASE_BASE_URL
     headers: {
         'x-rapidapi-key': RAPIDAPI_KEY,
         'x-rapidapi-host': RAPIDAPI_HOST,
@@ -167,6 +167,11 @@ function parseForm(formString) { if (!formString) return { win: 0, draw: 0, lose
 /**
  * Genera una predicción de partido utilizando un modelo simplificado basado en Poisson.
  * Obtiene estadísticas de temporadas anteriores si no están disponibles para la temporada actual.
+ * @param {number} homeTeamId - ID del equipo local.
+ * @param {number} awayTeamId - ID del equipo visitante.
+ * @param {number} leagueId - ID de la liga del partido actual (ej. 253 para 2025).
+ * @param {number} season - Año de la temporada del partido actual (ej. 2025).
+ * @returns {Promise<object>} Objeto con las predicciones del partido.
  */
 async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
     let homeTeamStatsRes;
