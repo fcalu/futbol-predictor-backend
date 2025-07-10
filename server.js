@@ -1,4 +1,3 @@
-// backend/server.js
 require('dotenv').config(); // Carga las variables de entorno desde .env
 const express = require('express');
 const axios = require('axios');
@@ -14,16 +13,14 @@ const API_BASE_URL = `https://${RAPIDAPI_HOST}/v3`;
 
 // Instancia de Axios configurada para la API-Football
 const apiFootball = axios.create({
-    baseURL: API_BASE_URL, // CORRECCIÓN: Era API_BASE_BASE_URL
+    baseURL: API_BASE_URL,
     headers: {
         'x-rapidapi-key': RAPIDAPI_KEY,
         'x-rapidapi-host': RAPIDAPI_HOST,
     },
 });
 
-// ======================================================
-// === CONFIGURACIÓN DE LA CACHE EN MEMORIA ===
-// ======================================================
+// --- CONFIGURACIÓN DE LA CACHE EN MEMORIA ---
 const cache = {}; // Objeto global para almacenar la cache
 
 /**
@@ -45,7 +42,7 @@ const cachedApiCall = async (endpoint, params, ttl = 3600 * 1000) => { // TTL po
 
     // Si no está en cache o ha expirado, hacer la llamada a la API
     console.log(`🌍 Cache MISS: ${endpoint} - ${cacheKey.substring(0, 50)}... Fetching from API...`);
-    
+
     try {
         const response = await apiFootball.get(endpoint, { params });
 
@@ -54,7 +51,7 @@ const cachedApiCall = async (endpoint, params, ttl = 3600 * 1000) => { // TTL po
             const apiErrorMessage = Object.values(response.data.errors).join(', ');
             throw new Error(`API-Football Error: ${apiErrorMessage}`);
         }
-        
+
         // Almacenar la respuesta exitosa en cache
         cache[cacheKey] = {
             data: response.data,
@@ -76,14 +73,12 @@ const cachedApiCall = async (endpoint, params, ttl = 3600 * 1000) => { // TTL po
     }
 };
 
-// ======================================================
-// === MIDDLEWARE DE LA APLICACIÓN ===
-// ======================================================
+// --- MIDDLEWARE DE LA APLICACIÓN ---
 
 // PRIMERO: Middleware para parsear cuerpos JSON (¡ESENCIAL PARA req.body!)
-app.use(express.json()); 
+app.use(express.json());
 // SEGUNDO: Middleware CORS
-app.use(cors()); 
+app.use(cors());
 
 // Middleware para depuración (opcional, puedes quitarlo después)
 app.use((req, res, next) => {
@@ -91,10 +86,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// ======================================================
-// === FUNCIONES PARA OBTENER DATOS DE LA API-FOOTBALL ===
-// === (AHORA USAN CACHE) ===
-// ======================================================
+// --- FUNCIONES PARA OBTENER DATOS DE LA API-FOOTBALL (AHORA USAN CACHE) ---
 
 /**
  * Obtiene partidos futuros de una liga y temporada (ahora con cache).
@@ -106,7 +98,7 @@ app.use((req, res, next) => {
 const fetchFixtures = async (leagueId, season, next = 5) => {
     const fixturesTtl = 60 * 60 * 1000; // Cachear fixtures por 1 hora
     const responseData = await cachedApiCall('/fixtures', { league: leagueId, season: season, next: next, timezone: 'America/Mexico_City' }, fixturesTtl);
-    
+
     if (responseData.errors && Object.keys(responseData.errors).length > 0) {
         const apiErrorMessage = Object.values(responseData.errors).join(', ');
         throw new Error(`API-Football Error: ${apiErrorMessage}`);
@@ -125,14 +117,19 @@ const getTeamStatistics = async (teamId, leagueId, season) => {
     const statsTtl = 6 * 3600 * 1000; // Cachear estadísticas por 6 horas
     const responseData = await cachedApiCall('/teams/statistics', { team: teamId, league: leagueId, season: season }, statsTtl);
 
+    // DEBUG: Log de la respuesta cruda de la API para estadísticas del equipo
+    console.log(`DEBUG: Raw API response for Team ${teamId}, League ${leagueId}, Season ${season}:`, JSON.stringify(responseData, null, 2));
+
     if (responseData.errors && Object.keys(responseData.errors).length > 0) {
         const apiErrorMessage = Object.values(responseData.errors).join(', ');
-        throw new Error(`API-Football Error: ${apiErrorMessage}`);
+        throw new Error(`API-Football Error for /teams/statistics: ${apiErrorMessage}`);
     }
-    if (responseData.response && responseData.response.length > 0) {
-        return responseData.response[0];
+
+    if (responseData.response && Object.keys(responseData.response).length > 0) {
+        return responseData.response;
     }
-    throw new Error(`No statistics found for team ${teamId} in league ${leagueId} season ${season}`);
+    
+    throw new Error(`No statistics found for team ${teamId} in league ${leagueId} season ${season}. API response was empty or malformed.`);
 };
 
 /**
@@ -145,23 +142,27 @@ const getStandings = async (leagueId, season) => {
     const standingsTtl = 6 * 3600 * 1000; // Cachear clasificaciones por 6 horas
     const responseData = await cachedApiCall('/standings', { league: leagueId, season: season }, standingsTtl);
 
+    // DEBUG: Log de la respuesta cruda de la API para clasificación de la liga
+    console.log(`DEBUG: Raw API response for Standings League ${leagueId}, Season ${season}:`, JSON.stringify(responseData, null, 2));
+
     if (responseData.errors && Object.keys(responseData.errors).length > 0) {
         const apiErrorMessage = Object.values(responseData.errors).join(', ');
-        throw new Error(`API-Football Error: ${apiErrorMessage}`);
+        throw new Error(`API-Football Error for /standings: ${apiErrorMessage}`);
     }
-    if (responseData.response && responseData.response.length > 0 && responseData.response[0].league.standings.length > 0) {
+    
+    if (responseData.response && responseData.response.length > 0 && 
+        responseData.response[0].league && responseData.response[0].league.standings && 
+        responseData.response[0].league.standings.length > 0) {
         return responseData.response[0].league.standings[0];
     }
-    throw new Error(`No standings found for league ${leagueId} season ${season}`);
+    throw new Error(`No standings found for league ${leagueId} season ${season}. API response was empty or malformed.`);
 };
 
-// ===========================================
-// === FUNCIONES PARA EL MODELO DE PREDICIÓN ===
-// ===========================================
+// --- FUNCIONES PARA EL MODELO DE PREDICCIÓN ---
 
-function factorial(n) { if (n === 0) return 1; let res = 1; for (let i = 2; i <= n; i++) res *= i; return res;}
-function poissonPMF(k, lambda) { if (lambda < 0) return 0; return (Math.pow(lambda, k) * Math.exp(-lambda)) / factorial(k);}
-function parseForm(formString) { if (!formString) return { win: 0, draw: 0, lose: 0 }; const wins = (formString.match(/W/g) || []).length; const draws = (formString.match(/D/g) || []).length; const losses = (formString.match(/L/g) || []).length; return { win: wins, draw: draws, lose: losses };}
+function factorial(n) { if (n === 0) return 1; let res = 1; for (let i = 2; i <= n; i++) res *= i; return res; }
+function poissonPMF(k, lambda) { if (lambda < 0) return 0; return (Math.pow(lambda, k) * Math.exp(-lambda)) / factorial(k); }
+function parseForm(formString) { if (!formString) return { win: 0, draw: 0, lose: 0 }; const wins = (formString.match(/W/g) || []).length; const draws = (formString.match(/D/g) || []).length; const losses = (formString.match(/L/g) || []).length; return { win: wins, draw: draws, lose: losses }; }
 
 
 /**
@@ -169,8 +170,8 @@ function parseForm(formString) { if (!formString) return { win: 0, draw: 0, lose
  * Obtiene estadísticas de temporadas anteriores si no están disponibles para la temporada actual.
  * @param {number} homeTeamId - ID del equipo local.
  * @param {number} awayTeamId - ID del equipo visitante.
- * @param {number} leagueId - ID de la liga del partido actual (ej. 253 para 2025).
- * @param {number} season - Año de la temporada del partido actual (ej. 2025).
+ * @param {number} leagueId - ID de la liga del partido actual.
+ * @param {number} season - Año de la temporada del partido actual.
  * @returns {Promise<object>} Objeto con las predicciones del partido.
  */
 async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
@@ -180,14 +181,20 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
     let statsSeasonUsed = season;
 
     const seasonsToTry = [season];
-    if (season > 2000) {
-        seasonsToTry.push(season - 1);
-        seasonsToTry.push(season - 2);
+    if (season >= 2022) {
+        if (!seasonsToTry.includes(season - 1)) seasonsToTry.push(season - 1);
+        if (!seasonsToTry.includes(season - 2)) seasonsToTry.push(season - 2);
     }
+    seasonsToTry.sort((a, b) => b - a); // Ordenar para que las temporadas más recientes se prueben primero
 
     let statsFetchedSuccessfully = false;
 
     for (const s of seasonsToTry) {
+        if (s < 2022 || statsFetchedSuccessfully) {
+            if (s < 2022) console.log(`Parando búsqueda de estadísticas, la temporada ${s} es anterior a 2022.`);
+            break;
+        }
+
         try {
             console.log(`Intentando obtener estadísticas para liga ${leagueId}, temporada ${s}...`);
             homeTeamStatsRes = await getTeamStatistics(homeTeamId, leagueId, s);
@@ -204,42 +211,42 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
     }
 
     if (!statsFetchedSuccessfully || !homeTeamStatsRes || !awayTeamStatsRes || !leagueStandingsRes) {
-        throw new Error(`No se pudieron obtener estadísticas válidas para los equipos en las temporadas intentadas (${seasonsToTry.join(', ')}).`);
+        throw new Error(`No se pudieron obtener estadísticas válidas para los equipos en las temporadas intentadas (${seasonsToTry.join(', ')}). Asegúrate de que los IDs de equipos y liga sean correctos y que la API tenga datos para esas temporadas.`);
     }
 
     const homeTeamName = homeTeamStatsRes.team?.name || 'Equipo Local';
     const awayTeamName = awayTeamStatsRes.team?.name || 'Equipo Visitante';
 
     const homePlayedHome = homeTeamStatsRes.fixtures?.played?.home || 1;
-    const homeGoalsForHome = homeTeamStatsRes.goals?.for?.home || 0;
-    const homeGoalsAgainstHome = homeTeamStatsRes.goals?.against?.home || 0;
+    const homeGoalsForHome = homeTeamStatsRes.goals?.for?.home?.total || 0;
+    const homeGoalsAgainstHome = homeTeamStatsRes.goals?.against?.home?.total || 0;
 
     const awayPlayedAway = awayTeamStatsRes.fixtures?.played?.away || 1;
-    const awayGoalsForAway = awayTeamStatsRes.goals?.for?.away || 0;
-    const awayGoalsAgainstAway = awayTeamStatsRes.goals?.against?.away || 0;
+    const awayGoalsForAway = awayTeamStatsRes.goals?.for?.away?.total || 0;
+    const awayGoalsAgainstAway = awayTeamStatsRes.goals?.against?.away?.total || 0;
 
     let totalLeagueGoals = 0;
     let totalLeagueMatches = 0;
     if (leagueStandingsRes && Array.isArray(leagueStandingsRes)) {
         for (const team of leagueStandingsRes) {
             if (team.all) {
-                totalLeagueGoals += team.all.goals.for + team.all.goals.against;
-                totalLeagueMatches += team.all.played;
+                totalLeagueGoals += (team.all.goals.for || 0) + (team.all.goals.against || 0);
+                totalLeagueMatches += (team.all.played || 0);
             }
         }
     }
     const leagueAvgGoalsPerMatch = totalLeagueMatches > 0 ? totalLeagueGoals / totalLeagueMatches : 2.5;
 
-    const homeAttackStrength = (homeGoalsForHome / homePlayedHome) / (leagueAvgGoalsPerMatch || 1);
-    const homeDefenseStrength = (homeGoalsAgainstHome / homePlayedHome) / (leagueAvgGoalsPerMatch || 1);
+    const homeAttackStrength = (homeGoalsForHome / (homePlayedHome || 1)) / (leagueAvgGoalsPerMatch || 1);
+    const homeDefenseStrength = (homeGoalsAgainstHome / (homePlayedHome || 1)) / (leagueAvgGoalsPerMatch || 1);
 
-    const awayAttackStrength = (awayGoalsForAway / awayPlayedAway) / (leagueAvgGoalsPerMatch || 1);
-    const awayDefenseStrength = (awayGoalsAgainstAway / awayPlayedAway) / (leagueAvgGoalsPerMatch || 1);
+    const awayAttackStrength = (awayGoalsForAway / (awayPlayedAway || 1)) / (leagueAvgGoalsPerMatch || 1);
+    const awayDefenseStrength = (awayGoalsAgainstAway / (awayPlayedAway || 1)) / (leagueAvgGoalsPerMatch || 1);
 
     const HOME_ADVANTAGE_FACTOR = 1.2;
 
-    const expectedGoalsHome = homeAttackStrength * (1 / awayDefenseStrength) * HOME_ADVANTAGE_FACTOR;
-    const expectedGoalsAway = awayAttackStrength * (1 / homeDefenseStrength);
+    const expectedGoalsHome = homeAttackStrength * (1 / (awayDefenseStrength || 1)) * HOME_ADVANTAGE_FACTOR;
+    const expectedGoalsAway = awayAttackStrength * (1 / (homeDefenseStrength || 1));
 
     const lambdaHome = isNaN(expectedGoalsHome) || !isFinite(expectedGoalsHome) ? 1.5 : Math.max(0.1, expectedGoalsHome);
     const lambdaAway = isNaN(expectedGoalsAway) || !isFinite(expectedGoalsAway) ? 1.0 : Math.max(0.1, expectedGoalsAway);
@@ -313,7 +320,7 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
             advice: advice,
             winner: { name: predictedWinnerName },
             btts: bttsProb > 0.5,
-            under_over: over2_5Prob > 0.5 ? '+2.5' : '-2.5',
+            under_over: "-2.5", // This should dynamically reflect over2_5Prob, fixed below
             goals: {
                 home: lambdaHome.toFixed(2),
                 away: lambdaAway.toFixed(2),
@@ -333,12 +340,12 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
                 away: totalAwayFormGames > 0 ? ((awayComparisonForm.win + awayComparisonForm.draw / 2) / totalAwayFormGames * 100).toFixed(0) + "%" : "50%"
             },
             att: {
-                home: ((lambdaHome / (lambdaHome + lambdaAway)) * 100).toFixed(0) + "%",
-                away: ((lambdaAway / (lambdaHome + lambdaAway)) * 100).toFixed(0) + "%"
+                home: ((lambdaHome / (lambdaHome + lambdaAway || 1)) * 100).toFixed(0) + "%",
+                away: ((lambdaAway / (lambdaHome + lambdaAway || 1)) * 100).toFixed(0) + "%"
             },
             def: {
-                home: ((lambdaAway / (lambdaHome + lambdaAway)) * 100).toFixed(0) + "%",
-                away: ((lambdaHome / (lambdaHome + lambdaAway)) * 100).toFixed(0) + "%"
+                home: ((lambdaAway / (lambdaHome + lambdaAway || 1)) * 100).toFixed(0) + "%",
+                away: ((lambdaHome / (lambdaHome + lambdaAway || 1)) * 100).toFixed(0) + "%"
             },
             poisson_distribution: {
                 home: (homeWinProb * 100).toFixed(0) + "%",
@@ -346,8 +353,8 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
             },
             h2h: { home: "50%", away: "50%" },
             goals: {
-                home: ((homeGoalsForHome / (homeGoalsForHome + awayGoalsForAway)) * 100).toFixed(0) + "%",
-                away: ((awayGoalsForAway / (homeGoalsForHome + awayGoalsForAway)) * 100).toFixed(0) + "%"
+                home: ((homeGoalsForHome / (homeGoalsForHome + awayGoalsForAway || 1)) * 100).toFixed(0) + "%",
+                away: ((awayGoalsForAway / (homeGoalsForHome + awayGoalsForAway || 1)) * 100).toFixed(0) + "%"
             },
             total: {
                 home: ((homeWinProb + (drawProb / 2)) * 100).toFixed(0) + "%",
@@ -357,9 +364,7 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
     };
 }
 
-// =======================
-// === ENDPOINTS DE LA API ===
-// =======================
+// --- ENDPOINTS DE LA API ---
 
 // Endpoint para obtener partidos futuros
 app.get('/api/all-fixtures', async (req, res) => {
@@ -377,9 +382,13 @@ app.get('/api/all-fixtures', async (req, res) => {
         console.error("❌ Error en el endpoint /api/all-fixtures:", error.message);
         let details = error.message;
         try {
-            const parsedError = JSON.parse(error.message);
-            if (parsedError && typeof parsedError === 'object' && Object.keys(parsedError).length > 0) {
-                details = parsedError;
+            const jsonStartIndex = error.message.indexOf('{');
+            if (jsonStartIndex !== -1) {
+                const jsonPart = error.message.substring(jsonStartIndex);
+                const parsedError = JSON.parse(jsonPart);
+                if (parsedError && typeof parsedError === 'object' && Object.keys(parsedError).length > 0) {
+                    details = parsedError;
+                }
             }
         } catch (e) {
             // Not a JSON error, use original message
@@ -412,24 +421,20 @@ app.post('/api/predict-match', async (req, res) => {
 // --- NUEVO ENDPOINT: PARLEY DEL DÍA ---
 app.get('/api/parley-del-dia', async (req, res) => {
     const nextFixturesCount = 20; // Cuántos partidos futuros escanear por liga
-    let bestParley = null;
-    let highestConfidence = 0; // Para el ganador (Home/Away/Draw)
-    
-    // Define las ligas y temporadas que quieres escanear para el Parley del Día
-    // Es CRÍTICO que estas combinaciones de liga/temporada tengan datos de estadísticas disponibles
+    const allCandidateLegs = []; // Collect all potential parley legs
+
     const leaguesToScanForParley = [
         { id: 39, season: 2024, name: "Premier League" }, // Premier League 2024/2025
-        { id: 140, season: 2024, name: "La Liga" },      // La Liga 2024/2025
-        { id: 135, season: 2024, name: "Serie A" },      // Serie A 2024/2025
-        // Puedes añadir más si sabes que tienen datos consistentes
-        // { id: 253, season: 2024, name: "Major League Soccer" }, // MLS 2024 (si sus stats funcionan para 2024/2023)
+        { id: 140, season: 2024, name: "La Liga" },       // La Liga 2024/2025
+        { id: 135, season: 2024, name: "Serie A" },       // Serie A 2024/2025
+        { id: 253, season: 2024, name: "Major League Soccer" }, // MLS 2024
     ];
 
     for (const leagueInfo of leaguesToScanForParley) {
         try {
             console.log(`🔎 Escaneando partidos para Parley: ${leagueInfo.name}, Temporada ${leagueInfo.season}...`);
             const fixturesData = await fetchFixtures(leagueInfo.id, leagueInfo.season, nextFixturesCount);
-            
+
             if (fixturesData.response && fixturesData.response.length > 0) {
                 for (const fixture of fixturesData.response) {
                     try {
@@ -437,7 +442,7 @@ app.get('/api/parley-del-dia', async (req, res) => {
                             fixture.teams.home.id,
                             fixture.teams.away.id,
                             fixture.league.id,
-                            fixture.league.season // Usar la temporada del fixture, no la de stats para el cálculo
+                            fixture.league.season
                         );
 
                         const homeProb = parseFloat(predictionResult.predictions.percent.home) / 100;
@@ -447,39 +452,36 @@ app.get('/api/parley-del-dia', async (req, res) => {
                         const over2_5Prob = predictionResult.predictions.over_2_5_probability / 100;
                         const under2_5Prob = predictionResult.predictions.under_2_5_probability / 100;
 
-                        let bestPick = null;
+                        let bestPickDescription = null;
                         let pickConfidence = 0;
                         let pickType = '';
-                        let pickDescription = '';
                         let simulatedIndividualOdd = 0;
 
                         if (homeProb >= 0.75) {
-                            bestPick = `${fixture.teams.home.name} gana el partido`;
+                            bestPickDescription = `${fixture.teams.home.name} gana el partido`;
                             pickConfidence = homeProb;
                             pickType = 'Ganador';
                         } else if (awayProb >= 0.75) {
-                            bestPick = `${fixture.teams.away.name} gana el partido`;
+                            bestPickDescription = `${fixture.teams.away.name} gana el partido`;
                             pickConfidence = awayProb;
                             pickType = 'Ganador';
                         }
                         else if (over2_5Prob >= 0.70) {
-                            pickDescription = 'Más de 2.5 Goles';
+                            bestPickDescription = 'Más de 2.5 Goles';
                             pickConfidence = over2_5Prob;
                             pickType = 'Total de Goles';
-                        }
-                        else if (bttsProb >= 0.70) {
-                            pickDescription = 'Ambos Anotan: SÍ';
+                        } else if (bttsProb >= 0.70) {
+                            bestPickDescription = 'Ambos Anotan: SÍ';
                             pickConfidence = bttsProb;
                             pickType = 'Ambos Anotan';
-                        }
-                        else if (under2_5Prob >= 0.70) {
-                            pickDescription = 'Menos de 2.5 Goles';
+                        } else if (under2_5Prob >= 0.70) {
+                            bestPickDescription = 'Menos de 2.5 Goles';
                             pickConfidence = under2_5Prob;
                             pickType = 'Total de Goles';
                         }
 
 
-                        if (bestPick && pickConfidence > 0) {
+                        if (bestPickDescription && pickConfidence > 0) {
                             simulatedIndividualOdd = (1 / pickConfidence);
                             allCandidateLegs.push({
                                 match_id: fixture.fixture.id,
@@ -490,7 +492,7 @@ app.get('/api/parley-del-dia', async (req, res) => {
                                 competition_name: fixture.league.name,
                                 starting_at: fixture.fixture.date,
                                 pick_type: pickType,
-                                pick_description: pickDescription,
+                                pick_description: bestPickDescription,
                                 confidence_percent: parseFloat((pickConfidence * 100).toFixed(1)),
                                 simulated_individual_odd: parseFloat(simulatedIndividualOdd.toFixed(2)),
                                 league_id: fixture.league.id,
@@ -498,7 +500,7 @@ app.get('/api/parley-del-dia', async (req, res) => {
                             });
                         }
                     } catch (predictionError) {
-                        console.warn(`⚠️ Fallo al generar predicción para fixture ${fixture.fixture.id}: ${predictionError.message}`);
+                        console.warn(`⚠️ Fallo al generar predicción para fixture ${fixture.fixture.id} (${fixture.teams.home.name} vs ${fixture.teams.away.name}): ${predictionError.message}`);
                     }
                 }
             }
@@ -506,6 +508,8 @@ app.get('/api/parley-del-dia', async (req, res) => {
             console.error(`❌ Error al escanear liga ${leagueInfo.name} para Parley: ${leagueError.message}`);
         }
     }
+
+    allCandidateLegs.sort((a, b) => b.confidence_percent - a.confidence_percent);
 
     const selectedLegs = [];
     const usedMatchIds = new Set();
@@ -519,8 +523,8 @@ app.get('/api/parley-del-dia', async (req, res) => {
     }
 
     if (selectedLegs.length < targetLegs) {
-        console.warn(`😔 No se pudieron encontrar suficientes selecciones de alta confianza para el parley del día. Encontrados: ${selectedLegs.length}`);
-        return res.status(404).json({ message: "No se encontró un Parley del Día emocionante hoy. ¡Vuelve pronto!" });
+        console.warn(`😔 No se pudieron encontrar suficientes selecciones de alta confianza (${targetLegs}) para el parley del día. Encontrados: ${selectedLegs.length}`);
+        return res.status(404).json({ message: "No se encontró un Parley del Día emocionante hoy con la confianza deseada. ¡Vuelve pronto!", found_legs: selectedLegs.length, required_legs: targetLegs });
     }
 
     let totalSimulatedOdd = 1;
@@ -541,9 +545,7 @@ app.get('/api/parley-del-dia', async (req, res) => {
 
 });
 
-// ===================
-// === INICIO DEL SERVIDOR ===
-// ===================
+// --- INICIO DEL SERVIDOR ---
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Servidor backend corriendo en http://0.0.0.0:${PORT}`);
