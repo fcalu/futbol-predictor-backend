@@ -685,3 +685,4 @@ app.listen(PORT, '0.0.0.0', () => {
         console.warn('⚠️ ADVERTENCIA: La clave RAPIDAPI_KEY no está configurada. Las llamadas a la API-Football fallarán.');
     }
 });
+//update
