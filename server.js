@@ -277,39 +277,53 @@ function convertOddToImpliedProbability(odd) {
 async function fetchFixtureOdds(fixtureId) {
     try {
         // Llama a la API para obtener mercados de apuestas
-        const res = await cachedApiCall('/odds', { fixture: fixtureId }, 30 * 60 * 1000); // TTL 30 min
+        const res = await cachedApiCall('/odds', { fixture: fixtureId }, 30 * 60 * 1000);
         if (!res || !res.response || res.response.length === 0) return null;
 
-        const bets = res.response[0]?.bookmakers?.[0]?.bets;
-        if (!bets || !Array.isArray(bets)) return null;
+        const betsArr = res.response[0]?.bookmakers?.[0]?.bets || [];
 
-        // Busca el mercado principal (1X2), puede llamarse "Match Winner", "Fulltime Result" o similar
-        const mainMarkets = bets.filter(bet => 
-            bet.name === "Match Winner" || 
-            bet.name === "Fulltime Result" || 
-            bet.name === "Resultado Final" || 
-            bet.name === "1X2"
+        // --- Buscar mercados ---
+        let odds = {};
+
+        // 1X2
+        const main1X2 = betsArr.find(bet =>
+            ["Match Winner", "Fulltime Result", "Resultado Final", "1X2"].includes(bet.name)
         );
-
-        if (!mainMarkets || mainMarkets.length === 0) return null;
-
-        // Puede haber varias casas, tomamos la primera con datos completos
-        const mainBet = mainMarkets[0];
-        const values = mainBet.values;
-        if (!values || values.length < 3) return null;
-
-        // Busca las cuotas para local, empate, visitante (pueden llamarse "Home", "Draw", "Away" o "1"/"X"/"2")
-        let home = null, draw = null, away = null;
-        for (const val of values) {
-            if (val.value === "Home" || val.value === "1") home = val.odd;
-            if (val.value === "Draw" || val.value === "X") draw = val.odd;
-            if (val.value === "Away" || val.value === "2") away = val.odd;
+        if (main1X2) {
+            main1X2.values.forEach(val => {
+                if (["Home", "1"].includes(val.value)) odds.home = parseFloat(val.odd);
+                if (["Draw", "X"].includes(val.value)) odds.draw = parseFloat(val.odd);
+                if (["Away", "2"].includes(val.value)) odds.away = parseFloat(val.odd);
+            });
         }
 
-        if (!home || !draw || !away) return null;
-        return { home: parseFloat(home), draw: parseFloat(draw), away: parseFloat(away) };
+        // BTTS (Both Teams to Score)
+        const bttsBet = betsArr.find(bet =>
+            ["Both Teams To Score", "Ambos equipos anotarán", "BTTS"].includes(bet.name)
+        );
+        if (bttsBet) {
+            bttsBet.values.forEach(val => {
+                if (val.value.toLowerCase().includes('yes') || val.value.toLowerCase().includes('sí')) odds.btts_yes = parseFloat(val.odd);
+                if (val.value.toLowerCase().includes('no')) odds.btts_no = parseFloat(val.odd);
+            });
+        }
+
+        // Over/Under 2.5 Goals
+        const ou25Bet = betsArr.find(bet =>
+            bet.name.toLowerCase().includes("over/under") && bet.values.some(v => v.value === "Over 2.5" || v.value === "Under 2.5")
+        );
+        if (ou25Bet) {
+            ou25Bet.values.forEach(val => {
+                if (val.value === "Over 2.5") odds.over25 = parseFloat(val.odd);
+                if (val.value === "Under 2.5") odds.under25 = parseFloat(val.odd);
+            });
+        }
+
+        // Puedes agregar Double Chance, etc., igual que arriba
+
+        return odds;
     } catch (err) {
-        console.error("Error obteniendo cuotas mercado 1X2 para fixture", fixtureId, err.message);
+        console.error("Error obteniendo cuotas para fixture", fixtureId, err.message);
         return null;
     }
 }
@@ -639,7 +653,8 @@ if (bttsProb < 0.4 && mostProbableScoreHome > 0 && mostProbableScoreAway > 0) {
                 away: ((awayWinProb + (drawProb / 2)) * 100).toFixed(0) + "%" 
             },
         },
-        market_odds: marketOdds ? { home: marketOdds.home, draw: marketOdds.draw, away: marketOdds.away } : null,
+        market_odds: marketOdds ? marketOdds : null,
+
     };
 }
 
@@ -712,21 +727,20 @@ app.get('/api/parley-del-dia', async (req, res) => {
     const today = new Date();
     const dateISO = today.toISOString().slice(0, 10);
 
-    // 1. Si ya hay parley para hoy en caché, devuélvelo SIEMPRE (no importa si los partidos ya iniciaron)
+    // Mantener el parley fijo para todo el día (mismo comportamiento)
     if (parleyCache.data && parleyCache.data.parley_id === `daily-parley-${dateISO}`) {
         return res.json(parleyCache.data);
     }
 
-    // 2. Solo si NO existe parley para hoy, intenta generar uno
     const leaguesToScanForParley = [
         { league: 253, season: 2025, name: "Major League Soccer" },
         { league: 128, season: 2025, name: "Liga Profesional Argentina" },
-        { league: 265, season: 2025, name: "Primera División" }, 
+        { league: 265, season: 2025, name: "Primera División" },
         { league: 98, season: 2025, name: "J1 League" }
     ];
 
     let allCandidateLegs = [];
-    let targetLegs = 2; // Número de partidos para el parley
+    let targetLegs = 2; // Puedes poner 3 para parley triple
 
     try {
         for (const leagueInfo of leaguesToScanForParley) {
@@ -743,7 +757,6 @@ app.get('/api/parley-del-dia', async (req, res) => {
 
             if (fixturesData.response && fixturesData.response.length > 0) {
                 for (const fixture of fixturesData.response) {
-                    // Ya no filtrar por status.short === 'NS' para que permita partidos empezados (solo al generarlo)
                     if (
                         fixture.teams.home.id &&
                         fixture.teams.away.id
@@ -753,60 +766,68 @@ app.get('/api/parley-del-dia', async (req, res) => {
                                 fixture.teams.home.id,
                                 fixture.teams.away.id,
                                 fixture.league.id,
-                                fixture.league.season
+                                fixture.league.season,
+                                fixture.fixture.id // <-- importante pasar el fixtureId!
                             );
 
+                            // 1. Calcular los picks candidatos con confianza suficiente
                             const homeProb = parseFloat(predictionResult.predictions.percent.home) / 100;
                             const awayProb = parseFloat(predictionResult.predictions.percent.away) / 100;
+                            const drawProb = parseFloat(predictionResult.predictions.percent.draw) / 100;
                             const bttsProb = predictionResult.predictions.btts_probability / 100;
                             const over2_5Prob = predictionResult.predictions.over_2_5_probability / 100;
                             const under2_5Prob = predictionResult.predictions.under_2_5_probability / 100;
 
-                            let bestPickDescription = null;
-                            let pickConfidence = 0;
-                            let pickType = '';
-                            let simulatedIndividualOdd = 0;
+                            // --- OBTENER LAS CUOTAS DEL MERCADO DE LA API ---
+                            const marketOdds = predictionResult.market_odds;
+                            let candidatePick = null;
 
-                            if (homeProb >= 0.60) {
-                                bestPickDescription = `${fixture.teams.home.name} gana el partido`;
-                                pickConfidence = homeProb;
-                                pickType = 'Ganador Local';
-                            } else if (awayProb >= 0.60) {
-                                bestPickDescription = `${fixture.teams.away.name} gana el partido`;
-                                pickConfidence = awayProb;
-                                pickType = 'Ganador Visitante';
-                            } else if (over2_5Prob >= 0.55) {
-                                bestPickDescription = 'Más de 2.5 Goles';
-                                pickConfidence = over2_5Prob;
-                                pickType = 'Total de Goles';
-                            } else if (bttsProb >= 0.55) {
-                                bestPickDescription = 'Ambos Anotan: SÍ';
-                                pickConfidence = bttsProb;
-                                pickType = 'Ambos Anotan';
-                            } else if (under2_5Prob >= 0.55) {
-                                bestPickDescription = 'Menos de 2.5 Goles';
-                                pickConfidence = under2_5Prob;
-                                pickType = 'Total de Goles';
+                            // --- Selección profesional: elige el mejor pick y cuota real ---
+                            if (marketOdds && homeProb >= 0.60) {
+                                candidatePick = {
+                                    type: 'Ganador Local',
+                                    description: `${fixture.teams.home.name} gana el partido`,
+                                    confidence: homeProb,
+                                    odd: marketOdds.home,
+                                    market: '1X2'
+                                };
+                            } else if (marketOdds && awayProb >= 0.60) {
+                                candidatePick = {
+                                    type: 'Ganador Visitante',
+                                    description: `${fixture.teams.away.name} gana el partido`,
+                                    confidence: awayProb,
+                                    odd: marketOdds.away,
+                                    market: '1X2'
+                                };
+                            } else if (marketOdds && drawProb >= 0.40 && drawProb > homeProb && drawProb > awayProb && marketOdds.draw > 2.0) {
+                                candidatePick = {
+                                    type: 'Empate',
+                                    description: `Empate`,
+                                    confidence: drawProb,
+                                    odd: marketOdds.draw,
+                                    market: '1X2'
+                                };
                             }
+                            // BTTS/OverUnder: Puedes agregar si también tienes la cuota desde la API
+                            // Ejemplo: Si tienes cuotas para BTTS y Over/Under en la respuesta market_odds (extiéndelo)
+                            // ... aquí iría la lógica si quieres agregar otros mercados con cuota
 
-                            if (bestPickDescription && pickConfidence > 0) {
-                                simulatedIndividualOdd = (1 / pickConfidence);
+                            // Doble oportunidad: Si tienes ese mercado en tu backend, agrégalo aquí
+
+                            if (candidatePick && candidatePick.odd > 1.4) {
                                 allCandidateLegs.push({
                                     match_id: fixture.fixture.id,
                                     home_team: fixture.teams.home.name,
                                     away_team: fixture.teams.away.name,
                                     home_logo: fixture.teams.home.logo,
                                     away_logo: fixture.teams.away.logo,
-                                    home_team_id: fixture.teams.home.id,
-                                    away_team_id: fixture.teams.away.id,
                                     competition_name: fixture.league.name,
                                     starting_at: fixture.fixture.date,
-                                    pick_type: pickType,
-                                    pick_description: bestPickDescription,
-                                    confidence_percent: parseFloat((pickConfidence * 100).toFixed(1)),
-                                    simulated_individual_odd: parseFloat(simulatedIndividualOdd.toFixed(2)),
-                                    league_id: fixture.league.id,
-                                    season_year: fixture.league.season,
+                                    pick_type: candidatePick.type,
+                                    pick_description: candidatePick.description,
+                                    confidence_percent: parseFloat((candidatePick.confidence * 100).toFixed(1)),
+                                    real_odd: parseFloat(candidatePick.odd.toFixed(2)),
+                                    market: candidatePick.market
                                 });
                             }
                         } catch (predictionError) {
@@ -817,10 +838,8 @@ app.get('/api/parley-del-dia', async (req, res) => {
             }
         }
 
-        // Ordenar por mayor confianza
         allCandidateLegs.sort((a, b) => b.confidence_percent - a.confidence_percent);
 
-        // Seleccionar los mejores
         const finalSelectedLegs = [];
         const usedMatchIds = new Set();
         for (const leg of allCandidateLegs) {
@@ -831,44 +850,41 @@ app.get('/api/parley-del-dia', async (req, res) => {
         }
 
         if (finalSelectedLegs.length < targetLegs) {
-            // No hay suficientes picks hoy: guarda el mensaje en el caché para todo el día
             parleyCache.data = {
                 parley_id: `daily-parley-${dateISO}`,
                 title: `Parley del Día`,
                 advice: "",
                 legs: [],
                 message: "Estamos generando el Parley del Día, vuelve en unos minutos. Si ya hay partidos, muy pronto estará disponible aquí.",
-                total_simulated_odd: null,
+                total_real_odd: null,
                 total_confidence_percent: null
             };
             parleyCache.timestamp = now;
             return res.status(404).json(parleyCache.data);
         }
 
-        let totalSimulatedOdd = 1;
+        // --- Cálculo de cuota total REAL ---
+        let totalRealOdd = 1;
         let totalConfidencePercent = 1;
         finalSelectedLegs.forEach(leg => {
-            totalSimulatedOdd *= leg.simulated_individual_odd;
+            totalRealOdd *= leg.real_odd;
             totalConfidencePercent *= (leg.confidence_percent / 100);
         });
 
         const responseData = {
             parley_id: `daily-parley-${dateISO}`,
-            title: `🏆 Doble de Confianza del Día - ${today.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })}`,
-            advice: "¡Esta es nuestra combinación más sólida de hoy, respaldada por nuestro modelo! Juega con estrategia.",
+            title: `🏆 Parley del Día - Picks con valor`,
+            advice: "¡Apuesta responsable! Picks generados por modelo estadístico y cuotas reales.",
             legs: finalSelectedLegs,
-            total_simulated_odd: parseFloat(totalSimulatedOdd.toFixed(2)),
+            total_real_odd: parseFloat(totalRealOdd.toFixed(2)),
             total_confidence_percent: parseFloat((totalConfidencePercent * 100).toFixed(1)),
         };
 
-        // Guarda el parley del día para que NO vuelva a consultar a la API
         parleyCache.data = responseData;
         parleyCache.timestamp = now;
-
         return res.json(responseData);
 
     } catch (err) {
-        // En caso de error, guarda el mensaje en caché para evitar bombardear la API
         parleyCache.data = {
             parley_id: `daily-parley-${dateISO}`,
             title: `Parley del Día`,
@@ -881,6 +897,7 @@ app.get('/api/parley-del-dia', async (req, res) => {
         return res.status(500).json(parleyCache.data);
     }
 });
+
 
 // --- ENDPOINT GET para obtener predicción por fixtureId ---
 app.get('/api/prediction/:fixtureId', async (req, res) => {
