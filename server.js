@@ -485,193 +485,177 @@ app.post('/api/predict-match', async (req, res) => {
     }
 });
 
-// --- NUEVO ENDPOINT: PARLEY DEL DÍA ---
+// --- CACHÉ GLOBAL PARA PARLEY DEL DÍA ---
+let parleyCache = {
+    data: null,
+    timestamp: 0,
+    ttl: 20 * 60 * 1000 // 20 minutos en milisegundos
+};
+
+// --- ENDPOINT: PARLEY DEL DÍA ---
+// Coloca esto en tu server.js (reemplaza el endpoint anterior)
 app.get('/api/parley-del-dia', async (req, res) => {
-    const nextFixturesCount = 20; // Cuántos partidos futuros escanear por liga
-    const allCandidateLegs = []; // Collect all potential parley legs
-
-    // Define las ligas y temporadas que quieres escanear para el Parley del Día
-    // Es CRÍTICO que estas combinaciones de liga/temporada tengan datos de estadísticas disponibles
-    // Se priorizan ligas grandes y la temporada más reciente con datos completos
-    const leaguesToScanForParley = [
-        { league: 262, season: 2025, name: "Liga MX" },     // Para obtener próximos partidos de la temp. 2025/2026
-  { league: 3, season: 2025, name: "UEFA Europa League" },      // Para obtener próximos partidos de la temp. 2025/2026
-  { league: 848, season: 2025, name: "UEFA Europa Conference League" }, // Para obtener próximos partidos de la temp. 2025/2026
-  { league: 253, season: 2025, name: "Major League Soccer" },   // Para obtener próximos partidos de la temp. 2025
-  { league: 772, season: 2025, name: "Leagues Cup" }, 
-  { league: 128, season: 2025, name: "Liga Profesional Argentina" },
-  { league: 113, season: 2025, name: "Allsvenskan" },   
-    ];
-
-    // --- Lógica para escanear próximos 3 días si no se encuentran partidos hoy ---
-    const today = new Date();
-    const datesToScan = [
-        today.toISOString().slice(0, 10), // Hoy
-    ];
-    // Añadir los próximos 2 días si es necesario
-    for (let i = 1; i <= 2; i++) {
-        const nextDay = new Date(today);
-        nextDay.setDate(today.getDate() + i);
-        datesToScan.push(nextDay.toISOString().slice(0, 10));
+    const now = Date.now();
+    // Si hay parley en caché y no expiró, lo devolvemos
+    if (parleyCache.data && (now - parleyCache.timestamp < parleyCache.ttl)) {
+        return res.json(parleyCache.data);
     }
 
+    // Ligas para escanear (sólo UNA para no saturar, puedes cambiarla después)
+    const leaguesToScanForParley = [
+        { league: 253, season: 2025, name: "Major League Soccer" } // Solo MLS para empezar
+        // Ejemplo para agregar más después: { league: 262, season: 2025, name: "Liga MX" }
+    ];
 
-    let foundEnoughLegs = false;
-    const targetLegs = 2; // Queremos un parley de 2 partidos
+    const today = new Date();
+    const dateISO = today.toISOString().slice(0, 10);
 
-    for (const date of datesToScan) {
-        console.log(`🔍 Escaneando partidos para la fecha: ${date}...`);
+    let allCandidateLegs = [];
+    let targetLegs = 2; // 2 partidos para el parley
+
+    try {
         for (const leagueInfo of leaguesToScanForParley) {
-            if (foundEnoughLegs) break; // Si ya encontramos suficientes, salimos
-            try {
-                // Modificar fetchFixtures para buscar por fecha específica y liga
-                // La API-Football permite el parámetro 'date' para buscar fixtures en un día específico.
-                const fixturesData = await cachedApiCall('/fixtures', { league: leagueInfo.id, season: leagueInfo.season, date: date, timezone: 'America/Mexico_City' }, 60 * 60 * 1000);
-                
-                if (fixturesData.response && fixturesData.response.length > 0) {
-                    for (const fixture of fixturesData.response) {
-                        if (foundEnoughLegs) break; // Si ya encontramos suficientes, salimos
-                        // Solo considerar partidos que no hayan empezado y que tengan equipos válidos
-                        if (fixture.fixture.status.short === 'NS' && fixture.teams.home.id && fixture.teams.away.id) {
-                            try {
-                                const predictionResult = await getMatchPrediction(
-                                    fixture.teams.home.id,
-                                    fixture.teams.away.id,
-                                    fixture.league.id,
-                                    fixture.league.season 
-                                );
+            // Buscar partidos de hoy (puedes agregar días después si quieres)
+            const fixturesData = await cachedApiCall(
+                '/fixtures',
+                {
+                    league: leagueInfo.league,
+                    season: leagueInfo.season,
+                    date: dateISO,
+                    timezone: 'America/Mexico_City'
+                },
+                60 * 60 * 1000
+            );
 
-                                const homeProb = parseFloat(predictionResult.predictions.percent.home) / 100;
-                                const awayProb = parseFloat(predictionResult.predictions.percent.away) / 100;
-                                const drawProb = parseFloat(predictionResult.predictions.percent.draw) / 100;
-                                const bttsProb = predictionResult.predictions.btts_probability / 100;
-                                const over2_5Prob = predictionResult.predictions.over_2_5_probability / 100;
-                                const under2_5Prob = predictionResult.predictions.under_2_5_probability / 100;
+            if (fixturesData.response && fixturesData.response.length > 0) {
+                for (const fixture of fixturesData.response) {
+                    // Solo partidos que no han iniciado y equipos válidos
+                    if (
+                        fixture.fixture.status.short === 'NS' &&
+                        fixture.teams.home.id &&
+                        fixture.teams.away.id
+                    ) {
+                        try {
+                            const predictionResult = await getMatchPrediction(
+                                fixture.teams.home.id,
+                                fixture.teams.away.id,
+                                fixture.league.id,
+                                fixture.league.season
+                            );
 
-                                let bestPickDescription = null;
-                                let pickConfidence = 0;
-                                let pickType = '';
-                                let simulatedIndividualOdd = 0;
+                            const homeProb = parseFloat(predictionResult.predictions.percent.home) / 100;
+                            const awayProb = parseFloat(predictionResult.predictions.percent.away) / 100;
+                            const bttsProb = predictionResult.predictions.btts_probability / 100;
+                            const over2_5Prob = predictionResult.predictions.over_2_5_probability / 100;
+                            const under2_5Prob = predictionResult.predictions.under_2_5_probability / 100;
 
-                                // Criterios para seleccionar las "patas" del parley:
-                                // Umbrales de confianza ligeramente más flexibles para aumentar la probabilidad de encontrar 2 partidos
-                                // Prioridad 1: Ganador del partido con alta confianza (>= 60%) - Bajado de 65%
-                                if (homeProb >= 0.60) {
-                                    bestPickDescription = `${fixture.teams.home.name} gana el partido`;
-                                    pickConfidence = homeProb;
-                                    pickType = 'Ganador Local';
-                                } else if (awayProb >= 0.60) {
-                                    bestPickDescription = `${fixture.teams.away.name} gana el partido`;
-                                    pickConfidence = awayProb;
-                                    pickType = 'Ganador Visitante';
-                                }
-                                // Prioridad 2: Más de 2.5 Goles con alta confianza (>= 55%) - Bajado de 60%
-                                else if (over2_5Prob >= 0.55) {
-                                    bestPickDescription = 'Más de 2.5 Goles';
-                                    pickConfidence = over2_5Prob;
-                                    pickType = 'Total de Goles';
-                                }
-                                // Prioridad 3: Ambos Anotan SÍ con alta confianza (>= 55%) - Bajado de 60%
-                                else if (bttsProb >= 0.55) { 
-                                    bestPickDescription = 'Ambos Anotan: SÍ';
-                                    pickConfidence = bttsProb;
-                                    pickType = 'Ambos Anotan';
-                                }
-                                // Prioridad 4: Menos de 2.5 Goles con alta confianza (>= 55%) - Bajado de 60%
-                                else if (under2_5Prob >= 0.55) {
-                                    bestPickDescription = 'Menos de 2.5 Goles';
-                                    pickConfidence = under2_5Prob;
-                                    pickType = 'Total de Goles';
-                                }
+                            let bestPickDescription = null;
+                            let pickConfidence = 0;
+                            let pickType = '';
+                            let simulatedIndividualOdd = 0;
 
-                                if (bestPickDescription && pickConfidence > 0) {
-                                    simulatedIndividualOdd = (1 / pickConfidence);
-                                    allCandidateLegs.push({
-                                        match_id: fixture.fixture.id,
-                                        home_team: fixture.teams.home.name,
-                                        away_team: fixture.teams.away.name,
-                                        home_logo: fixture.teams.home.logo,
-                                        away_logo: fixture.teams.away.logo,
-                                        home_team_id: fixture.teams.home.id, 
-                                        away_team_id: fixture.teams.away.id, 
-                                        competition_name: fixture.league.name,
-                                        starting_at: fixture.fixture.date,
-                                        pick_type: pickType,
-                                        pick_description: bestPickDescription,
-                                        confidence_percent: parseFloat((pickConfidence * 100).toFixed(1)),
-                                        simulated_individual_odd: parseFloat(simulatedIndividualOdd.toFixed(2)),
-                                        league_id: fixture.league.id,
-                                        season_year: fixture.league.season,
-                                    });
-                                }
-                            } catch (predictionError) {
-                                // console.warn(`⚠️ Fallo al generar predicción para fixture ${fixture.fixture.id} (${fixture.teams.home.name} vs ${fixture.teams.away.name}): ${predictionError.message}`); // Descomentar para depuración
+                            // Criterios del pick (puedes ajustar los umbrales)
+                            if (homeProb >= 0.60) {
+                                bestPickDescription = `${fixture.teams.home.name} gana el partido`;
+                                pickConfidence = homeProb;
+                                pickType = 'Ganador Local';
+                            } else if (awayProb >= 0.60) {
+                                bestPickDescription = `${fixture.teams.away.name} gana el partido`;
+                                pickConfidence = awayProb;
+                                pickType = 'Ganador Visitante';
+                            } else if (over2_5Prob >= 0.55) {
+                                bestPickDescription = 'Más de 2.5 Goles';
+                                pickConfidence = over2_5Prob;
+                                pickType = 'Total de Goles';
+                            } else if (bttsProb >= 0.55) {
+                                bestPickDescription = 'Ambos Anotan: SÍ';
+                                pickConfidence = bttsProb;
+                                pickType = 'Ambos Anotan';
+                            } else if (under2_5Prob >= 0.55) {
+                                bestPickDescription = 'Menos de 2.5 Goles';
+                                pickConfidence = under2_5Prob;
+                                pickType = 'Total de Goles';
                             }
+
+                            if (bestPickDescription && pickConfidence > 0) {
+                                simulatedIndividualOdd = (1 / pickConfidence);
+                                allCandidateLegs.push({
+                                    match_id: fixture.fixture.id,
+                                    home_team: fixture.teams.home.name,
+                                    away_team: fixture.teams.away.name,
+                                    home_logo: fixture.teams.home.logo,
+                                    away_logo: fixture.teams.away.logo,
+                                    home_team_id: fixture.teams.home.id,
+                                    away_team_id: fixture.teams.away.id,
+                                    competition_name: fixture.league.name,
+                                    starting_at: fixture.fixture.date,
+                                    pick_type: pickType,
+                                    pick_description: bestPickDescription,
+                                    confidence_percent: parseFloat((pickConfidence * 100).toFixed(1)),
+                                    simulated_individual_odd: parseFloat(simulatedIndividualOdd.toFixed(2)),
+                                    league_id: fixture.league.id,
+                                    season_year: fixture.league.season,
+                                });
+                            }
+                        } catch (predictionError) {
+                            // Continúa con el siguiente partido si falla la predicción
                         }
                     }
                 }
-            } catch (leagueError) {
-                console.error(`❌ Error al escanear liga ${leagueInfo.name} para Parley en ${date}: ${leagueError.message}`);
             }
         }
-        
-        // Después de escanear todas las ligas para la fecha actual,
-        // ordenamos y seleccionamos si ya tenemos suficientes.
-        allCandidateLegs.sort((a, b) => {
-            if (b.confidence_percent !== a.confidence_percent) {
-                return b.confidence_percent - a.confidence_percent;
+
+        // Ordenar por mayor confianza
+        allCandidateLegs.sort((a, b) => b.confidence_percent - a.confidence_percent);
+
+        // Seleccionar los mejores (2)
+        const finalSelectedLegs = [];
+        const usedMatchIds = new Set();
+        for (const leg of allCandidateLegs) {
+            if (finalSelectedLegs.length < targetLegs && !usedMatchIds.has(leg.match_id)) {
+                finalSelectedLegs.push(leg);
+                usedMatchIds.add(leg.match_id);
             }
-            return b.simulated_individual_odd - a.simulated_individual_odd;
+        }
+
+        if (finalSelectedLegs.length < targetLegs) {
+            // Si no hay suficientes, responde con advertencia
+            return res.status(404).json({
+                message: "No se encontró un Parley del Día emocionante hoy con la confianza deseada. ¡Vuelve pronto!",
+                found_legs: finalSelectedLegs.length,
+                required_legs: targetLegs
+            });
+        }
+
+        let totalSimulatedOdd = 1;
+        let totalConfidencePercent = 1;
+        finalSelectedLegs.forEach(leg => {
+            totalSimulatedOdd *= leg.simulated_individual_odd;
+            totalConfidencePercent *= (leg.confidence_percent / 100);
         });
 
-        // Seleccionamos las mejores hasta ahora
-        const currentSelectedLegs = [];
-        const currentUsedMatchIds = new Set();
-        for (const leg of allCandidateLegs) {
-            if (currentSelectedLegs.length < targetLegs && !currentUsedMatchIds.has(leg.match_id)) {
-                currentSelectedLegs.push(leg);
-                currentUsedMatchIds.add(leg.match_id);
-            }
-        }
+        const responseData = {
+            parley_id: `daily-parley-${dateISO}`,
+            title: `🏆 Doble de Confianza del Día - ${today.toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })}`,
+            advice: "¡Esta es nuestra combinación más sólida de hoy, respaldada por nuestro modelo! Juega con estrategia.",
+            legs: finalSelectedLegs,
+            total_simulated_odd: parseFloat(totalSimulatedOdd.toFixed(2)),
+            total_confidence_percent: parseFloat((totalConfidencePercent * 100).toFixed(1)),
+        };
 
-        if (currentSelectedLegs.length === targetLegs) {
-            foundEnoughLegs = true; // Encontramos suficientes, podemos salir del bucle de fechas
-            break; 
-        }
+        // Guardar en caché
+        parleyCache.data = responseData;
+        parleyCache.timestamp = Date.now();
+
+        res.json(responseData);
+
+    } catch (err) {
+        console.error("❌ Error en /api/parley-del-dia:", err.message);
+        return res.status(500).json({
+            message: "Error al generar el Parley del Día.",
+            error: err.message || err
+        });
     }
-
-    const finalSelectedLegs = [];
-    const finalUsedMatchIds = new Set();
-    // Re-seleccionar de allCandidateLegs para asegurar que sean los 2 mejores de todo el escaneo
-    for (const leg of allCandidateLegs) {
-        if (finalSelectedLegs.length < targetLegs && !finalUsedMatchIds.has(leg.match_id)) {
-            finalSelectedLegs.push(leg);
-            finalUsedMatchIds.add(leg.match_id);
-        }
-    }
-
-
-    if (finalSelectedLegs.length < targetLegs) {
-        console.warn(`😔 No se pudieron encontrar suficientes selecciones de alta confianza (${targetLegs}) para el parley del día. Encontrados: ${finalSelectedLegs.length}`);
-        return res.status(404).json({ message: "No se encontró un Parley del Día emocionante hoy con la confianza deseada. ¡Vuelve pronto!", found_legs: finalSelectedLegs.length, required_legs: targetLegs });
-    }
-
-    let totalSimulatedOdd = 1;
-    let totalConfidencePercent = 1;
-    finalSelectedLegs.forEach(leg => {
-        totalSimulatedOdd *= leg.simulated_individual_odd;
-        totalConfidencePercent *= (leg.confidence_percent / 100);
-    });
-
-    res.json({
-        parley_id: `daily-parley-${new Date().toISOString().slice(0, 10)}`,
-        title: `🏆 Doble de Confianza del Día - ${new Date().toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit', year: 'numeric' })}`,
-        advice: "¡Esta es nuestra combinación más sólida de hoy, respaldada por nuestro modelo! Juega con estrategia.",
-        legs: finalSelectedLegs,
-        total_simulated_odd: parseFloat(totalSimulatedOdd.toFixed(2)),
-        total_confidence_percent: parseFloat((totalConfidencePercent * 100).toFixed(1)),
-    });
-
 });
 
 // ===================
