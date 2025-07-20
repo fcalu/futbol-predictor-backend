@@ -565,34 +565,48 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season, fixt
     const totalAwayFormGames = awayComparisonForm.win + awayComparisonForm.draw + awayComparisonForm.lose;
 
     let mostProbableScoreHome = 0; 
-    let mostProbableScoreAway = 0; 
-    let maxScoreProb = -1;
-    for (let hg = 0; hg <= maxGoalsConsidered; hg++) {
-        for (let ag = 0; ag <= maxGoalsConsidered; ag++) {
-            const probHomeGoals = poissonPMF(hg, expectedGoalsHome);
-            const probAwayGoals = poissonPMF(ag, expectedGoalsAway);
-            const scoreProb = probHomeGoals * probAwayGoals;
-            if (scoreProb > maxScoreProb) { 
-                maxScoreProb = scoreProb; 
-                mostProbableScoreHome = hg; 
-                mostProbableScoreAway = ag; 
-            }
+let mostProbableScoreAway = 0; 
+let maxScoreProb = -1;
+for (let hg = 0; hg <= maxGoalsConsidered; hg++) {
+    for (let ag = 0; ag <= maxGoalsConsidered; ag++) {
+        const probHomeGoals = poissonPMF(hg, expectedGoalsHome);
+        const probAwayGoals = poissonPMF(ag, expectedGoalsAway);
+        const scoreProb = probHomeGoals * probAwayGoals;
+        if (scoreProb > maxScoreProb) { 
+            maxScoreProb = scoreProb; 
+            mostProbableScoreHome = hg; 
+            mostProbableScoreAway = ag; 
         }
     }
+}
+let mostProbableScore = `${mostProbableScoreHome} - ${mostProbableScoreAway}`;
 
+// ===== AJUSTE: coherencia entre BTTS y marcador =====
+let bttsNote = "";
+if (bttsProb < 0.4 && mostProbableScoreHome > 0 && mostProbableScoreAway > 0) {
+  // Si el modelo Poisson da resultado de ambos anotan pero el cálculo de btts es bajo
+  // Ajustar el marcador más probable para reflejarlo
+  if (homeXG >= awayXG) {
+    mostProbableScore = `${Math.max(1, Math.round(homeXG))} - 0`;
+  } else {
+    mostProbableScore = `0 - ${Math.max(1, Math.round(awayXG))}`;
+  }
+  bttsNote = "El modelo predice pocos goles de ambos equipos, es poco probable que ambos anoten.";
+}
     return {
-        predictions: {
-            advice: advice,
-            winner: { name: predictedWinnerName },
-            mostProbableScore: `${mostProbableScoreHome} - ${mostProbableScoreAway}`,
-            btts: bttsProb > 0.5,
-            under_over: over2_5Prob > 0.5 ? '+2.5' : '-2.5',
-            goals: { home: expectedGoalsHome.toFixed(2), away: expectedGoalsAway.toFixed(2), },
-            percent: { home: (homeWinProb * 100).toFixed(0) + '%', draw: (drawProb * 100).toFixed(0) + '%', away: (awayWinProb * 100).toFixed(0) + '%', },
-            btts_probability: parseFloat((bttsProb * 100).toFixed(1)),
-            over_2_5_probability: parseFloat((over2_5Prob * 100).toFixed(1)),
-            under_2_5_probability: parseFloat(((1 - over2_5Prob) * 100).toFixed(1)),
-        },
+           predictions: {
+        advice: advice,
+        winner: { name: predictedWinnerName },
+        mostProbableScore,        // ← así
+        btts: bttsProb > 0.5,
+        under_over: over2_5Prob > 0.5 ? '+2.5' : '-2.5',
+        goals: { home: expectedGoalsHome.toFixed(2), away: expectedGoalsAway.toFixed(2), },
+        percent: { home: (homeWinProb * 100).toFixed(0) + '%', draw: (drawProb * 100).toFixed(0) + '%', away: (awayWinProb * 100).toFixed(0) + '%', },
+        btts_probability: parseFloat((bttsProb * 100).toFixed(1)),
+        over_2_5_probability: parseFloat((over2_5Prob * 100).toFixed(1)),
+        under_2_5_probability: parseFloat(((1 - over2_5Prob) * 100).toFixed(1)),
+        btts_note: bttsNote,       // ← así
+    },
         comparison: {
             form: { 
                 home: totalHomeFormGames > 0 ? ((homeComparisonForm.win + homeComparisonForm.draw / 2) / totalHomeFormGames * 100).toFixed(0) + "%" : "50%", 
