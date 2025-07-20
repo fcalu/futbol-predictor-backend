@@ -707,30 +707,23 @@ let parleyCache = {
 
 // --- ENDPOINT: PARLEY DEL DÍA ---
 // Coloca esto en tu server.js (reemplaza el endpoint anterior)
-// --- ENDPOINT: PARLEY DEL DÍA ---
 app.get('/api/parley-del-dia', async (req, res) => {
     const now = Date.now();
-    // Si hay parley en caché y no expiró, lo devolvemos (esto ya mantiene fijo el parley del día)
-    if (parleyCache.data && (now - parleyCache.timestamp < parleyCache.ttl)) {
+    const today = new Date();
+    const dateISO = today.toISOString().slice(0, 10);
+
+    // 1. Si ya hay parley para hoy en caché, devuélvelo SIEMPRE (no importa si los partidos ya iniciaron)
+    if (parleyCache.data && parleyCache.data.parley_id === `daily-parley-${dateISO}`) {
         return res.json(parleyCache.data);
     }
 
-    // Nuevo: Si el parley del día existe (aunque partidos ya hayan iniciado), muéstralo igual.
-    // (Esto lo garantiza el caché, pero puedes aumentar el TTL para que dure TODO el día)
-    // Por ejemplo: 
-    parleyCache.ttl = 25 * 60 * 60 * 1000; // 25 horas (dura todo el día y un poco más)
-
-    // Ligas para escanear (sólo UNA para no saturar, puedes cambiarla después)
+    // 2. Solo si NO existe parley para hoy, intenta generar uno
     const leaguesToScanForParley = [
-        { league: 253, season: 2025, name: "Major League Soccer" }, // Solo MLS para empezar
+        { league: 253, season: 2025, name: "Major League Soccer" },
         { league: 128, season: 2025, name: "Liga Profesional Argentina" },
         { league: 265, season: 2025, name: "Primera División" }, 
-        { league: 98, season: 2025, name: "J1 League" },
-        // Puedes agregar más ligas aquí
+        { league: 98, season: 2025, name: "J1 League" }
     ];
-
-    const today = new Date();
-    const dateISO = today.toISOString().slice(0, 10);
 
     let allCandidateLegs = [];
     let targetLegs = 2; // Número de partidos para el parley
@@ -750,8 +743,7 @@ app.get('/api/parley-del-dia', async (req, res) => {
 
             if (fixturesData.response && fixturesData.response.length > 0) {
                 for (const fixture of fixturesData.response) {
-                    // Aquí ya no filtramos solo por NS (no iniciado),
-                    // así el parley incluye partidos aunque ya hayan empezado, útil para referencia del día.
+                    // Ya no filtrar por status.short === 'NS' para que permita partidos empezados (solo al generarlo)
                     if (
                         fixture.teams.home.id &&
                         fixture.teams.away.id
@@ -775,7 +767,6 @@ app.get('/api/parley-del-dia', async (req, res) => {
                             let pickType = '';
                             let simulatedIndividualOdd = 0;
 
-                            // Criterios del pick (puedes ajustar los umbrales)
                             if (homeProb >= 0.60) {
                                 bestPickDescription = `${fixture.teams.home.name} gana el partido`;
                                 pickConfidence = homeProb;
@@ -829,7 +820,7 @@ app.get('/api/parley-del-dia', async (req, res) => {
         // Ordenar por mayor confianza
         allCandidateLegs.sort((a, b) => b.confidence_percent - a.confidence_percent);
 
-        // Seleccionar los mejores (2)
+        // Seleccionar los mejores
         const finalSelectedLegs = [];
         const usedMatchIds = new Set();
         for (const leg of allCandidateLegs) {
@@ -840,12 +831,18 @@ app.get('/api/parley-del-dia', async (req, res) => {
         }
 
         if (finalSelectedLegs.length < targetLegs) {
-            // Nuevo mensaje UX amigable:
-            return res.status(404).json({
+            // No hay suficientes picks hoy: guarda el mensaje en el caché para todo el día
+            parleyCache.data = {
+                parley_id: `daily-parley-${dateISO}`,
+                title: `Parley del Día`,
+                advice: "",
+                legs: [],
                 message: "Estamos generando el Parley del Día, vuelve en unos minutos. Si ya hay partidos, muy pronto estará disponible aquí.",
-                found_legs: finalSelectedLegs.length,
-                required_legs: targetLegs
-            });
+                total_simulated_odd: null,
+                total_confidence_percent: null
+            };
+            parleyCache.timestamp = now;
+            return res.status(404).json(parleyCache.data);
         }
 
         let totalSimulatedOdd = 1;
@@ -864,18 +861,24 @@ app.get('/api/parley-del-dia', async (req, res) => {
             total_confidence_percent: parseFloat((totalConfidencePercent * 100).toFixed(1)),
         };
 
-        // Guardar en caché (así no cambia aunque partidos hayan comenzado)
+        // Guarda el parley del día para que NO vuelva a consultar a la API
         parleyCache.data = responseData;
-        parleyCache.timestamp = Date.now();
+        parleyCache.timestamp = now;
 
-        res.json(responseData);
+        return res.json(responseData);
 
     } catch (err) {
-        console.error("❌ Error en /api/parley-del-dia:", err.message);
-        return res.status(500).json({
-            message: "Error al generar el Parley del Día.",
+        // En caso de error, guarda el mensaje en caché para evitar bombardear la API
+        parleyCache.data = {
+            parley_id: `daily-parley-${dateISO}`,
+            title: `Parley del Día`,
+            advice: "",
+            legs: [],
+            message: "Estamos generando el Parley del Día, vuelve en unos minutos. Si ya hay partidos, muy pronto estará disponible aquí.",
             error: err.message || err
-        });
+        };
+        parleyCache.timestamp = now;
+        return res.status(500).json(parleyCache.data);
     }
 });
 
