@@ -259,7 +259,62 @@ function parseH2HResults(fixtures, homeTeamId, awayTeamId) {
  * @param {number} season - Año de la temporada del partido actual.
  * @returns {Promise<object>} Objeto con las predicciones del partido.
  */
-async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
+/**
+ * Obtiene las cuotas de 1X2 mercado principal para un fixture.
+ * @param {number} fixtureId 
+ * @returns {Promise<{home:number, draw:number, away:number}|null>}
+ */
+/**
+ * Convierte una cuota decimal (ej. 2.00) a probabilidad implícita.
+ * @param {number} odd 
+ * @returns {number} probabilidad (0-1)
+ */
+function convertOddToImpliedProbability(odd) {
+    if (!odd || odd <= 1) return 0;
+    return 1 / odd;
+}
+
+async function fetchFixtureOdds(fixtureId) {
+    try {
+        // Llama a la API para obtener mercados de apuestas
+        const res = await cachedApiCall('/odds', { fixture: fixtureId }, 30 * 60 * 1000); // TTL 30 min
+        if (!res || !res.response || res.response.length === 0) return null;
+
+        const bets = res.response[0]?.bookmakers?.[0]?.bets;
+        if (!bets || !Array.isArray(bets)) return null;
+
+        // Busca el mercado principal (1X2), puede llamarse "Match Winner", "Fulltime Result" o similar
+        const mainMarkets = bets.filter(bet => 
+            bet.name === "Match Winner" || 
+            bet.name === "Fulltime Result" || 
+            bet.name === "Resultado Final" || 
+            bet.name === "1X2"
+        );
+
+        if (!mainMarkets || mainMarkets.length === 0) return null;
+
+        // Puede haber varias casas, tomamos la primera con datos completos
+        const mainBet = mainMarkets[0];
+        const values = mainBet.values;
+        if (!values || values.length < 3) return null;
+
+        // Busca las cuotas para local, empate, visitante (pueden llamarse "Home", "Draw", "Away" o "1"/"X"/"2")
+        let home = null, draw = null, away = null;
+        for (const val of values) {
+            if (val.value === "Home" || val.value === "1") home = val.odd;
+            if (val.value === "Draw" || val.value === "X") draw = val.odd;
+            if (val.value === "Away" || val.value === "2") away = val.odd;
+        }
+
+        if (!home || !draw || !away) return null;
+        return { home: parseFloat(home), draw: parseFloat(draw), away: parseFloat(away) };
+    } catch (err) {
+        console.error("Error obteniendo cuotas mercado 1X2 para fixture", fixtureId, err.message);
+        return null;
+    }
+}
+
+async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season, fixtureId) {
     let homeTeamStatsRes;
     let awayTeamStatsRes;
     let leagueStandingsRes;
@@ -280,11 +335,20 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
 
     let seasonsToTry = [];
     if (season >= 2015) { seasonsToTry.push(season); }
-    for (let i = 1; i <= 10; i++) { const prevSeason = season - i; if (prevSeason >= 2015) { if (!seasonsToTry.includes(prevSeason)) { seasonsToTry.push(prevSeason); } } else { break; } }
+    for (let i = 1; i <= 10; i++) { 
+        const prevSeason = season - i; 
+        if (prevSeason >= 2015) { 
+            if (!seasonsToTry.includes(prevSeason)) { 
+                seasonsToTry.push(prevSeason); 
+            } 
+        } else { break; } 
+    }
     seasonsToTry.sort((a, b) => b - a); 
 
     let statsFetchedSuccessfully = false;
-    if (seasonsToTry.length === 0) { throw new Error(`No se pudieron obtener estadísticas válidas para los equipos en el rango requerido (>=2015).`); }
+    if (seasonsToTry.length === 0) { 
+        throw new Error(`No se pudieron obtener estadísticas válidas para los equipos en el rango requerido (>=2015).`); 
+    }
 
     for (const s of seasonsToTry) {
         if (statsFetchedSuccessfully) { break; }
@@ -297,7 +361,18 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
             const homePlayed = homeTeamStatsRes.fixtures?.played?.total || 0;
             const awayPlayed = awayTeamStatsRes.fixtures?.played?.total || 0;
             let standingsHasData = false;
-            if (Array.isArray(leagueStandingsRes)) { for (const group of leagueStandingsRes) { if (Array.isArray(group)) { for (const teamStat of group) { if ((teamStat.all?.played || 0) > 0) { standingsHasData = true; break; } } } if (standingsHasData) break; } }
+            if (Array.isArray(leagueStandingsRes)) { 
+                for (const group of leagueStandingsRes) { 
+                    if (Array.isArray(group)) { 
+                        for (const teamStat of group) { 
+                            if ((teamStat.all?.played || 0) > 0) { 
+                                standingsHasData = true; break; 
+                            } 
+                        } 
+                    } 
+                    if (standingsHasData) break; 
+                } 
+            }
 
             if (homePlayed > 0 && awayPlayed > 0 && standingsHasData) {
                 statsSeasonUsed = s;
@@ -321,8 +396,22 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
     const awayGoalsAgainstAway = awayTeamStatsRes.goals?.against?.total?.away || 0;
 
     let totalLeagueGoals = 0; let totalLeagueMatches = 0;
-    if (Array.isArray(leagueStandingsRes)) { for (const group of leagueStandingsRes) { if (Array.isArray(group)) { for (const teamStat of group) { if (teamStat.all) { totalLeagueGoals += (teamStat.all.goals.for || 0) + (teamStat.all.goals.against || 0); totalLeagueMatches += (teamStat.all.played || 0); } } } } }
-    else if (leagueStandingsRes && typeof leagueStandingsRes === 'object' && leagueStandingsRes.all) { totalLeagueGoals += (leagueStandingsRes.all.goals.for || 0) + (leagueStandingsRes.all.goals.against || 0); totalLeagueMatches += (leagueStandingsRes.all.played || 0); }
+    if (Array.isArray(leagueStandingsRes)) { 
+        for (const group of leagueStandingsRes) { 
+            if (Array.isArray(group)) { 
+                for (const teamStat of group) { 
+                    if (teamStat.all) { 
+                        totalLeagueGoals += (teamStat.all.goals.for || 0) + (teamStat.all.goals.against || 0); 
+                        totalLeagueMatches += (teamStat.all.played || 0); 
+                    } 
+                } 
+            } 
+        } 
+    }
+    else if (leagueStandingsRes && typeof leagueStandingsRes === 'object' && leagueStandingsRes.all) { 
+        totalLeagueGoals += (leagueStandingsRes.all.goals.for || 0) + (leagueStandingsRes.all.goals.against || 0); 
+        totalLeagueMatches += (leagueStandingsRes.all.played || 0); 
+    }
 
     const leagueAvgGoalsPerMatch = totalLeagueMatches > 0 ? totalLeagueGoals / totalLeagueMatches : 2.5;
 
@@ -342,16 +431,30 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
     let initialHomeWinProb = 0; let initialAwayWinProb = 0; let initialDrawProb = 0; let initialBttsProb = 0; let initialOver2_5Prob = 0;
     for (let hg = 0; hg <= maxGoalsConsidered; hg++) {
         for (let ag = 0; ag <= maxGoalsConsidered; ag++) {
-            const probHomeGoals = poissonPMF(hg, expectedGoalsHome); const probAwayGoals = poissonPMF(ag, expectedGoalsAway); const scoreProb = probHomeGoals * probAwayGoals;
-            if (hg > ag) initialHomeWinProb += scoreProb; else if (ag > hg) initialAwayWinProb += scoreProb; else initialDrawProb += scoreProb;
-            if (hg > 0 && ag > 0) initialBttsProb += scoreProb; if (hg + ag > 2.5) initialOver2_5Prob += scoreProb;
+            const probHomeGoals = poissonPMF(hg, expectedGoalsHome); 
+            const probAwayGoals = poissonPMF(ag, expectedGoalsAway); 
+            const scoreProb = probHomeGoals * probAwayGoals;
+            if (hg > ag) initialHomeWinProb += scoreProb; 
+            else if (ag > hg) initialAwayWinProb += scoreProb; 
+            else initialDrawProb += scoreProb;
+            if (hg > 0 && ag > 0) initialBttsProb += scoreProb; 
+            if (hg + ag > 2.5) initialOver2_5Prob += scoreProb;
         }
     }
     const initialTotalResultProb = initialHomeWinProb + initialAwayWinProb + initialDrawProb;
-    if (initialTotalResultProb > 0) { initialHomeWinProb /= initialTotalResultProb; initialAwayWinProb /= initialTotalResultProb; initialDrawProb /= initialTotalResultProb; } else { initialHomeWinProb = 0.33; initialAwayWinProb = 0.33; initialDrawProb = 0.34; }
+    if (initialTotalResultProb > 0) { 
+        initialHomeWinProb /= initialTotalResultProb; 
+        initialAwayWinProb /= initialTotalResultProb; 
+        initialDrawProb /= initialTotalResultProb; 
+    } else { 
+        initialHomeWinProb = 0.33; initialAwayWinProb = 0.33; initialDrawProb = 0.34; 
+    }
     
-    homeWinProb = initialHomeWinProb; awayWinProb = initialAwayWinProb; drawProb = initialDrawProb;
-    bttsProb = initialBttsProb; over2_5Prob = initialOver2_5Prob;
+    homeWinProb = initialHomeWinProb; 
+    awayWinProb = initialAwayWinProb; 
+    drawProb = initialDrawProb;
+    bttsProb = initialBttsProb; 
+    over2_5Prob = initialOver2_5Prob;
 
     if (h2hParsed.totalGames >= 3) { 
         const H2H_WEIGHT = 0.4; 
@@ -359,7 +462,13 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
         awayWinProb = (awayWinProb * (1 - H2H_WEIGHT)) + (h2hParsed.awayWinPercentage * H2H_WEIGHT);
         drawProb = (drawProb * (1 - H2H_WEIGHT)) + (h2hParsed.drawPercentage * H2H_WEIGHT);
         const sumCombinedProbs = homeWinProb + awayWinProb + drawProb;
-        if (sumCombinedProbs > 0) { homeWinProb /= sumCombinedProbs; awayWinProb /= sumCombinedProbs; drawProb /= sumCombinedProbs; } else { homeWinProb = 0.33; awayWinProb = 0.33; drawProb = 0.34; }
+        if (sumCombinedProbs > 0) { 
+            homeWinProb /= sumCombinedProbs; 
+            awayWinProb /= sumCombinedProbs; 
+            drawProb /= sumCombinedProbs; 
+        } else { 
+            homeWinProb = 0.33; awayWinProb = 0.33; drawProb = 0.34; 
+        }
 
         const originalTotalLambda = expectedGoalsHome + expectedGoalsAway; 
         const totalProbSum = homeWinProb + awayWinProb + drawProb; 
@@ -367,42 +476,107 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
         const awayLambdaRatio = (awayWinProb + (drawProb / 2)) / (totalProbSum || 1);
         expectedGoalsHome = originalTotalLambda * homeLambdaRatio;
         expectedGoalsAway = originalTotalLambda * awayLambdaRatio;
-        expectedGoalsHome = Math.max(0.1, expectedGoalsHome); expectedGoalsAway = Math.max(0.1, expectedGoalsAway);
+        expectedGoalsHome = Math.max(0.1, expectedGoalsHome); 
+        expectedGoalsAway = Math.max(0.1, expectedGoalsAway);
     }
 
+    // === INTEGRACIÓN DE ODDS DEL MERCADO ===
+    let marketOdds = null;
+    if (typeof fixtureId !== 'undefined' && fixtureId !== null) {
+        marketOdds = await fetchFixtureOdds(fixtureId);
+        if (marketOdds) {
+            const marketProbHome = convertOddToImpliedProbability(marketOdds.home);
+            const marketProbDraw = convertOddToImpliedProbability(marketOdds.draw);
+            const marketProbAway = convertOddToImpliedProbability(marketOdds.away);
+
+            const marketTotalProb = marketProbHome + marketProbDraw + marketProbAway;
+            // Normaliza
+            const normalizedMarketProbHome = marketProbHome / (marketTotalProb || 1);
+            const normalizedMarketProbDraw = marketProbDraw / (marketTotalProb || 1);
+            const normalizedMarketProbAway = marketProbAway / (marketTotalProb || 1);
+
+            const MARKET_WEIGHT = 0.3; // 30% mercado, 70% modelo
+            const MODEL_WEIGHT = 1 - MARKET_WEIGHT;
+
+            homeWinProb = (homeWinProb * MODEL_WEIGHT) + (normalizedMarketProbHome * MARKET_WEIGHT);
+            awayWinProb = (awayWinProb * MODEL_WEIGHT) + (normalizedMarketProbAway * MARKET_WEIGHT);
+            drawProb  = (drawProb * MODEL_WEIGHT) + (normalizedMarketProbDraw * MARKET_WEIGHT);
+
+            // Renormaliza
+            const finalSumProb = homeWinProb + awayWinProb + drawProb;
+            if (finalSumProb > 0) {
+                homeWinProb /= finalSumProb;
+                awayWinProb /= finalSumProb;
+                drawProb /= finalSumProb;
+            }
+
+            // Ajusta lambdas
+            const currentTotalLambda = expectedGoalsHome + expectedGoalsAway;
+            const currentTotalProbSum = homeWinProb + awayWinProb + drawProb;
+            const currentHomeLambdaRatio = (homeWinProb + (drawProb / 2)) / (currentTotalProbSum || 1);
+            const currentAwayLambdaRatio = (awayWinProb + (drawProb / 2)) / (currentTotalProbSum || 1);
+            expectedGoalsHome = currentTotalLambda * currentHomeLambdaRatio;
+            expectedGoalsAway = currentTotalLambda * currentAwayLambdaRatio;
+            expectedGoalsHome = Math.max(0.1, expectedGoalsHome);
+            expectedGoalsAway = Math.max(0.1, expectedGoalsAway);
+        }
+    }
+
+    // --- Vuelve a calcular los mercados dependientes de la lambda si metiste market odds ---
     const maxGoalsConsideredFinal = 5;
     let finalBttsProb = 0; let finalOver2_5Prob = 0;
     for (let hg = 0; hg <= maxGoalsConsideredFinal; hg++) {
         for (let ag = 0; ag <= maxGoalsConsideredFinal; ag++) {
-            const probHomeGoals = poissonPMF(hg, expectedGoalsHome); const probAwayGoals = poissonPMF(ag, expectedGoalsAway); const scoreProb = probHomeGoals * probAwayGoals;
-            if (hg > 0 && ag > 0) finalBttsProb += scoreProb; if (hg + ag > 2.5) finalOver2_5Prob += scoreProb;
+            const probHomeGoals = poissonPMF(hg, expectedGoalsHome); 
+            const probAwayGoals = poissonPMF(ag, expectedGoalsAway); 
+            const scoreProb = probHomeGoals * probAwayGoals;
+            if (hg > 0 && ag > 0) finalBttsProb += scoreProb; 
+            if (hg + ag > 2.5) finalOver2_5Prob += scoreProb;
         }
     }
-    bttsProb = finalBttsProb; over2_5Prob = finalOver2_5Prob;
+    bttsProb = finalBttsProb; 
+    over2_5Prob = finalOver2_5Prob;
 
     let predictedWinnerName = "Empate";
     let advice = `Predicción basada en nuestro modelo de IA/Bayes (estadísticas de la temporada ${statsSeasonUsed}).`;
     const maxResultProb = Math.max(homeWinProb, awayWinProb, drawProb);
 
-    if (maxResultProb === homeWinProb) { predictedWinnerName = homeTeamName; advice = `${homeTeamName} es el favorito según el modelo (estadísticas de la temporada ${statsSeasonUsed}).`; }
-    else if (maxResultProb === awayWinProb) { predictedWinnerName = awayTeamName; advice = `${awayTeamName} es el favorito según el modelo (estadísticas de la temporada ${statsSeasonUsed}).`; }
-    else if (maxResultProb === drawProb) { predictedWinnerName = "Empate"; advice = `El modelo sugiere un partido muy parejo con alta probabilidad de empate (estadísticas de la temporada ${statsSeasonUsed}).`; }
+    if (maxResultProb === homeWinProb) { 
+        predictedWinnerName = homeTeamName; 
+        advice = `${homeTeamName} es el favorito según el modelo (estadísticas de la temporada ${statsSeasonUsed}).`; 
+    }
+    else if (maxResultProb === awayWinProb) { 
+        predictedWinnerName = awayTeamName; 
+        advice = `${awayTeamName} es el favorito según el modelo (estadísticas de la temporada ${statsSeasonUsed}).`; 
+    }
+    else if (maxResultProb === drawProb) { 
+        predictedWinnerName = "Empate"; 
+        advice = `El modelo sugiere un partido muy parejo con alta probabilidad de empate (estadísticas de la temporada ${statsSeasonUsed}).`; 
+    }
 
-    if (bttsProb > 0.5) { advice += " Se espera que ambos equipos anoten."; } else { advice += " Es probable que un equipo no anote o el partido termine 0-0."; }
-    if (over2_5Prob > 0.5) { advice += " Se anticipan más de 2.5 goles en total."; } else { advice += " Se anticipan menos de 2.5 goles en total."; }
+    if (bttsProb > 0.5) { advice += " Se espera que ambos equipos anoten."; } 
+    else { advice += " Es probable que un equipo no anote o el partido termine 0-0."; }
+    if (over2_5Prob > 0.5) { advice += " Se anticipan más de 2.5 goles en total."; } 
+    else { advice += " Se anticipan menos de 2.5 goles en total."; }
 
     const homeComparisonForm = homeTeamStatsRes.form ? parseForm(homeTeamStatsRes.form) : { win: 0, draw: 0, lose: 0 };
     const awayComparisonForm = awayTeamStatsRes.form ? parseForm(awayTeamStatsRes.form) : { win: 0, draw: 0, lose: 0 };
     const totalHomeFormGames = homeComparisonForm.win + homeComparisonForm.draw + homeComparisonForm.lose;
     const totalAwayFormGames = awayComparisonForm.win + awayComparisonForm.draw + awayComparisonForm.lose;
 
-    let mostProbableScoreHome = 0; let mostProbableScoreAway = 0; let maxScoreProb = -1;
+    let mostProbableScoreHome = 0; 
+    let mostProbableScoreAway = 0; 
+    let maxScoreProb = -1;
     for (let hg = 0; hg <= maxGoalsConsidered; hg++) {
         for (let ag = 0; ag <= maxGoalsConsidered; ag++) {
             const probHomeGoals = poissonPMF(hg, expectedGoalsHome);
             const probAwayGoals = poissonPMF(ag, expectedGoalsAway);
             const scoreProb = probHomeGoals * probAwayGoals;
-            if (scoreProb > maxScoreProb) { maxScoreProb = scoreProb; mostProbableScoreHome = hg; mostProbableScoreAway = ag; }
+            if (scoreProb > maxScoreProb) { 
+                maxScoreProb = scoreProb; 
+                mostProbableScoreHome = hg; 
+                mostProbableScoreAway = ag; 
+            }
         }
     }
 
@@ -420,16 +594,41 @@ async function getMatchPrediction(homeTeamId, awayTeamId, leagueId, season) {
             under_2_5_probability: parseFloat(((1 - over2_5Prob) * 100).toFixed(1)),
         },
         comparison: {
-            form: { home: totalHomeFormGames > 0 ? ((homeComparisonForm.win + homeComparisonForm.draw / 2) / totalHomeFormGames * 100).toFixed(0) + "%" : "50%", away: totalAwayFormGames > 0 ? ((awayComparisonForm.win + awayComparisonForm.draw / 2) / totalAwayFormGames * 100).toFixed(0) + "%" : "50%" },
-            att: { home: ((expectedGoalsHome / (expectedGoalsHome + expectedGoalsAway || 1)) * 100).toFixed(0) + "%", away: ((expectedGoalsAway / (expectedGoalsHome + expectedGoalsAway || 1)) * 100).toFixed(0) + "%" },
-            def: { home: ((expectedGoalsAway / (expectedGoalsHome + expectedGoalsAway || 1)) * 100).toFixed(0) + "%", away: ((expectedGoalsHome / (expectedGoalsHome + expectedGoalsAway || 1)) * 100).toFixed(0) + "%" },
-            poisson_distribution: { home: (homeWinProb * 100).toFixed(0) + "%", away: (awayWinProb * 100).toFixed(0) + "%" },
-            h2h: { home: (h2hParsed.homeWinPercentage * 100).toFixed(0) + "%", away: (h2hParsed.awayWinPercentage * 100).toFixed(0) + "%", draw: (h2hParsed.drawPercentage * 100).toFixed(0) + "%", totalGames: h2hParsed.totalGames },
-            goals: { home: ((homeGoalsForHome / (homeGoalsForHome + awayGoalsForAway || 1)) * 100).toFixed(0) + "%", away: ((awayGoalsForAway / (homeGoalsForHome + awayGoalsForAway || 1)) * 100).toFixed(0) + "%" },
-            total: { home: ((homeWinProb + (drawProb / 2)) * 100).toFixed(0) + "%", away: ((awayWinProb + (drawProb / 2)) * 100).toFixed(0) + "%" },
+            form: { 
+                home: totalHomeFormGames > 0 ? ((homeComparisonForm.win + homeComparisonForm.draw / 2) / totalHomeFormGames * 100).toFixed(0) + "%" : "50%", 
+                away: totalAwayFormGames > 0 ? ((awayComparisonForm.win + awayComparisonForm.draw / 2) / totalAwayFormGames * 100).toFixed(0) + "%" : "50%" 
+            },
+            att: { 
+                home: ((expectedGoalsHome / (expectedGoalsHome + expectedGoalsAway || 1)) * 100).toFixed(0) + "%", 
+                away: ((expectedGoalsAway / (expectedGoalsHome + expectedGoalsAway || 1)) * 100).toFixed(0) + "%" 
+            },
+            def: { 
+                home: ((expectedGoalsAway / (expectedGoalsHome + expectedGoalsAway || 1)) * 100).toFixed(0) + "%", 
+                away: ((expectedGoalsHome / (expectedGoalsHome + expectedGoalsAway || 1)) * 100).toFixed(0) + "%" 
+            },
+            poisson_distribution: { 
+                home: (homeWinProb * 100).toFixed(0) + "%", 
+                away: (awayWinProb * 100).toFixed(0) + "%" 
+            },
+            h2h: { 
+                home: (h2hParsed.homeWinPercentage * 100).toFixed(0) + "%", 
+                away: (h2hParsed.awayWinPercentage * 100).toFixed(0) + "%", 
+                draw: (h2hParsed.drawPercentage * 100).toFixed(0) + "%", 
+                totalGames: h2hParsed.totalGames 
+            },
+            goals: { 
+                home: ((homeGoalsForHome / (homeGoalsForHome + awayGoalsForAway || 1)) * 100).toFixed(0) + "%", 
+                away: ((awayGoalsForAway / (homeGoalsForHome + awayGoalsForAway || 1)) * 100).toFixed(0) + "%" 
+            },
+            total: { 
+                home: ((homeWinProb + (drawProb / 2)) * 100).toFixed(0) + "%", 
+                away: ((awayWinProb + (drawProb / 2)) * 100).toFixed(0) + "%" 
+            },
         },
+        market_odds: marketOdds ? { home: marketOdds.home, draw: marketOdds.draw, away: marketOdds.away } : null,
     };
 }
+
 
 // --- ENDPOINTS DE LA API ---
 
