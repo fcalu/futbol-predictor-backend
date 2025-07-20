@@ -859,6 +859,31 @@ app.get('/api/parley-del-dia', async (req, res) => {
         });
     }
 });
+// --- ENDPOINT GET para obtener predicción por fixtureId ---
+app.get('/api/prediction/:fixtureId', async (req, res) => {
+  const fixtureId = req.params.fixtureId;
+
+  try {
+    // Busca el fixture en la API-Football usando el fixtureId
+    const fixtureResp = await cachedApiCall('/fixtures', { ids: fixtureId });
+    if (!fixtureResp.response || fixtureResp.response.length === 0) {
+      return res.status(404).json({ error: "Fixture no encontrado" });
+    }
+    const fixture = fixtureResp.response[0];
+    const homeTeamId = fixture.teams.home.id;
+    const awayTeamId = fixture.teams.away.id;
+    const leagueId = fixture.league.id;
+    const season = fixture.league.season;
+
+    // Llama al modelo de predicción con los datos correctos
+    const prediction = await getMatchPrediction(homeTeamId, awayTeamId, leagueId, season, fixtureId);
+
+    res.json(prediction);
+  } catch (err) {
+    console.error("[/api/prediction/:fixtureId] Error:", err.message);
+    res.status(500).json({ error: "Error al obtener la predicción", details: err.message });
+  }
+});
 
 // ===================
 // === INICIO DEL SERVIDOR ===
