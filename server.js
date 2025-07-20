@@ -503,7 +503,10 @@ app.get('/api/parley-del-dia', async (req, res) => {
 
     // Ligas para escanear (sólo UNA para no saturar, puedes cambiarla después)
     const leaguesToScanForParley = [
-        { league: 253, season: 2025, name: "Major League Soccer" } // Solo MLS para empezar
+        { league: 253, season: 2025, name: "Major League Soccer" }, // Solo MLS para empezar
+        { league: 128, season: 2025, name: "Liga Profesional Argentina" },
+        { league: 265, season: 2025, name: "Primera División" }, 
+        { league: 98, season: 2025, name: "J1 League" }, // Para obtener próximos partidos de la temp. 2025/2026
         // Ejemplo para agregar más después: { league: 262, season: 2025, name: "Liga MX" }
     ];
 
