@@ -658,7 +658,6 @@ if (bttsProb < 0.4 && mostProbableScoreHome > 0 && mostProbableScoreAway > 0) {
     };
 }
 
-
 // --- ENDPOINTS DE LA API ---
 
 // Endpoint para obtener partidos futuros
@@ -672,7 +671,22 @@ app.get('/api/all-fixtures', async (req, res) => {
         if (!data.response || data.response.length === 0) {
             return res.json({ response: [], message: "No se encontraron partidos para la liga/temporada especificada." });
         }
-        res.json(data);
+
+        // --- NUEVO: Obtener cuotas para cada partido ---
+        const enrichedFixtures = await Promise.all(data.response.map(async fixture => {
+            let market_odds = null;
+            try {
+                market_odds = await fetchFixtureOdds(fixture.fixture.id);
+            } catch (e) {
+                market_odds = null;
+            }
+            return {
+                ...fixture,
+                market_odds: market_odds // ahora el frontend tendrá acceso directo
+            };
+        }));
+
+        res.json({ response: enrichedFixtures });
     } catch (error) {
         console.error("❌ Error en el endpoint /api/all-fixtures:", error.message);
         let details = error.message;
@@ -691,6 +705,7 @@ app.get('/api/all-fixtures', async (req, res) => {
         res.status(500).json({ error: 'Fallo al obtener partidos', details: details });
     }
 });
+
 
 // Nuevo Endpoint para obtener predicciones personalizadas
 app.post('/api/predict-match', async (req, res) => {
@@ -736,7 +751,8 @@ app.get('/api/parley-del-dia', async (req, res) => {
         { league: 253, season: 2025, name: "Major League Soccer" },
         { league: 128, season: 2025, name: "Liga Profesional Argentina" },
         { league: 265, season: 2025, name: "Primera División" },
-        { league: 98, season: 2025, name: "J1 League" }
+        { league: 98, season: 2025, name: "J1 League" },
+        { league: 857, season: 2025, name: "Campeón de Campeones" },
     ];
 
     let allCandidateLegs = [];
