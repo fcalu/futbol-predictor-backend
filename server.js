@@ -671,22 +671,7 @@ app.get('/api/all-fixtures', async (req, res) => {
         if (!data.response || data.response.length === 0) {
             return res.json({ response: [], message: "No se encontraron partidos para la liga/temporada especificada." });
         }
-
-        // --- NUEVO: Obtener cuotas para cada partido ---
-        const enrichedFixtures = await Promise.all(data.response.map(async fixture => {
-            let market_odds = null;
-            try {
-                market_odds = await fetchFixtureOdds(fixture.fixture.id);
-            } catch (e) {
-                market_odds = null;
-            }
-            return {
-                ...fixture,
-                market_odds: market_odds // ahora el frontend tendrá acceso directo
-            };
-        }));
-
-        res.json({ response: enrichedFixtures });
+        res.json(data);
     } catch (error) {
         console.error("❌ Error en el endpoint /api/all-fixtures:", error.message);
         let details = error.message;
@@ -705,7 +690,6 @@ app.get('/api/all-fixtures', async (req, res) => {
         res.status(500).json({ error: 'Fallo al obtener partidos', details: details });
     }
 });
-
 
 // Nuevo Endpoint para obtener predicciones personalizadas
 app.post('/api/predict-match', async (req, res) => {
