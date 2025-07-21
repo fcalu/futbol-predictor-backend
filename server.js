@@ -897,6 +897,179 @@ app.get('/api/parley-del-dia', async (req, res) => {
         return res.status(500).json(parleyCache.data);
     }
 });
+// --- ENDPOINT: PARLEY 1X2 TRIPLE ---
+app.get('/api/parley-1x2', async (req, res) => {
+    const now = Date.now();
+    const today = new Date();
+    const dateISO = today.toISOString().slice(0, 10);
+
+    // Usar cache diaria para este endpoint
+    if (parleyCache.data && parleyCache.data.parley_id === `daily-parley-1x2-${dateISO}`) {
+        return res.json(parleyCache.data);
+    }
+
+    const leaguesToScan = [
+        { league: 253, season: 2025, name: "Major League Soccer" },
+        { league: 128, season: 2025, name: "Liga Profesional Argentina" },
+        { league: 265, season: 2025, name: "Primera División" },
+        { league: 98, season: 2025, name: "J1 League" },
+        { league: 857, season: 2025, name: "Campeón de Campeones" },
+    ];
+
+    let allCandidateLegs = [];
+    let targetLegs = 3; // Triple
+
+    try {
+        for (const leagueInfo of leaguesToScan) {
+            const fixturesData = await cachedApiCall(
+                '/fixtures',
+                {
+                    league: leagueInfo.league,
+                    season: leagueInfo.season,
+                    date: dateISO,
+                    timezone: 'America/Mexico_City'
+                },
+                60 * 60 * 1000
+            );
+
+            if (fixturesData.response && fixturesData.response.length > 0) {
+                for (const fixture of fixturesData.response) {
+                    if (
+                        fixture.teams.home.id &&
+                        fixture.teams.away.id
+                    ) {
+                        try {
+                            const predictionResult = await getMatchPrediction(
+                                fixture.teams.home.id,
+                                fixture.teams.away.id,
+                                fixture.league.id,
+                                fixture.league.season,
+                                fixture.fixture.id
+                            );
+
+                            // Solo picks 1X2
+                            const homeProb = parseFloat(predictionResult.predictions.percent.home) / 100;
+                            const awayProb = parseFloat(predictionResult.predictions.percent.away) / 100;
+                            const drawProb = parseFloat(predictionResult.predictions.percent.draw) / 100;
+
+                            const marketOdds = predictionResult.market_odds;
+                            let candidatePick = null;
+
+                            // Selecciona el pick de mayor confianza (de los 3 posibles 1X2)
+                            let maxConf = Math.max(homeProb, awayProb, drawProb);
+                            if (marketOdds && homeProb === maxConf && homeProb > 0.40) {
+                                candidatePick = {
+                                    type: 'Ganador Local',
+                                    description: `${fixture.teams.home.name} gana el partido`,
+                                    confidence: homeProb,
+                                    odd: marketOdds.home,
+                                    market: '1X2'
+                                };
+                            } else if (marketOdds && awayProb === maxConf && awayProb > 0.40) {
+                                candidatePick = {
+                                    type: 'Ganador Visitante',
+                                    description: `${fixture.teams.away.name} gana el partido`,
+                                    confidence: awayProb,
+                                    odd: marketOdds.away,
+                                    market: '1X2'
+                                };
+                            } else if (marketOdds && drawProb === maxConf && drawProb > 0.33 && marketOdds.draw > 2.0) {
+                                candidatePick = {
+                                    type: 'Empate',
+                                    description: `Empate`,
+                                    confidence: drawProb,
+                                    odd: marketOdds.draw,
+                                    market: '1X2'
+                                };
+                            }
+
+                            // Solo agregar si hay pick y cuota válida
+                            if (candidatePick && candidatePick.odd > 1.25) {
+                                allCandidateLegs.push({
+                                    match_id: fixture.fixture.id,
+                                    home_team: fixture.teams.home.name,
+                                    away_team: fixture.teams.away.name,
+                                    home_logo: fixture.teams.home.logo,
+                                    away_logo: fixture.teams.away.logo,
+                                    competition_name: fixture.league.name,
+                                    starting_at: fixture.fixture.date,
+                                    pick_type: candidatePick.type,
+                                    pick_description: candidatePick.description,
+                                    confidence_percent: parseFloat((candidatePick.confidence * 100).toFixed(1)),
+                                    real_odd: parseFloat(candidatePick.odd.toFixed(2)),
+                                    market: candidatePick.market
+                                });
+                            }
+                        } catch (predictionError) {
+                            // Continua si falla predicción
+                        }
+                    }
+                }
+            }
+        }
+
+        // Ordenar por confianza
+        allCandidateLegs.sort((a, b) => b.confidence_percent - a.confidence_percent);
+
+        // Selecciona los mejores 3 (sin repetir partidos)
+        const finalSelectedLegs = [];
+        const usedMatchIds = new Set();
+        for (const leg of allCandidateLegs) {
+            if (finalSelectedLegs.length < targetLegs && !usedMatchIds.has(leg.match_id)) {
+                finalSelectedLegs.push(leg);
+                usedMatchIds.add(leg.match_id);
+            }
+        }
+
+        if (finalSelectedLegs.length < targetLegs) {
+            parleyCache.data = {
+                parley_id: `daily-parley-1x2-${dateISO}`,
+                title: `Parley 1X2 Triple`,
+                advice: "No hay suficientes partidos de confianza para el parley triple 1X2 hoy.",
+                legs: finalSelectedLegs,
+                message: "Intenta más tarde o en otra fecha.",
+                total_real_odd: null,
+                total_confidence_percent: null
+            };
+            parleyCache.timestamp = now;
+            return res.json(parleyCache.data);
+        }
+
+        // --- Cálculo de cuota total ---
+        let totalRealOdd = 1;
+        let totalConfidencePercent = 1;
+        finalSelectedLegs.forEach(leg => {
+            totalRealOdd *= leg.real_odd;
+            totalConfidencePercent *= (leg.confidence_percent / 100);
+        });
+
+        const responseData = {
+            parley_id: `daily-parley-1x2-${dateISO}`,
+            title: `🎯 Parley 1X2 Triple`,
+            advice: "¡Picks solo del mercado 1X2 (Local, Empate o Visitante)!",
+            legs: finalSelectedLegs,
+            total_real_odd: parseFloat(totalRealOdd.toFixed(2)),
+            total_confidence_percent: parseFloat((totalConfidencePercent * 100).toFixed(1)),
+        };
+
+        parleyCache.data = responseData;
+        parleyCache.timestamp = now;
+        return res.json(responseData);
+
+    } catch (err) {
+        parleyCache.data = {
+            parley_id: `daily-parley-1x2-${dateISO}`,
+            title: `Parley 1X2 Triple`,
+            advice: "",
+            legs: [],
+            message: "Error generando el Parley 1X2 Triple.",
+            error: err.message || err
+        };
+        parleyCache.timestamp = now;
+        return res.status(500).json(parleyCache.data);
+    }
+});
+
 
 
 // --- ENDPOINT GET para obtener predicción por fixtureId ---
